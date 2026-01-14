@@ -1,0 +1,14 @@
+#!/bin/bash
+
+mkdir -p ./data
+
+podman stop chromadb
+podman rm chromadb
+podman run \
+  -it \
+  --name chromadb \
+  -p 8000:8000 \
+  -v ./data:/chroma/chroma \
+  -e IS_PERSISTENT=TRUE \
+  -e PERSIST_DIRECTORY=/chroma/chroma \
+  docker.io/chromadb/chroma:latest

@@ -1,0 +1,8 @@
+#!/bin/bash
+
+podman exec -it kafkaserver /opt/kafka/bin/kafka-topics.sh --create \
+  --topic ai_out \
+  --bootstrap-server localhost:9092 \
+  --partitions 1 \
+  --replication-factor 1 \
+  --config message.timestamp.type=LogAppendTime

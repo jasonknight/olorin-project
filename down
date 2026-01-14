@@ -1,0 +1,150 @@
+#!/bin/bash
+# Orchestration script to shut down all olorin-project components
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+echo -e "${GREEN}Shutting down olorin-project infrastructure...${NC}"
+
+# 1. Stop all background processes
+echo -e "\n${YELLOW}Stopping background processes...${NC}"
+if [ -d ".pids" ]; then
+    for pidfile in .pids/*.pid; do
+        if [ -f "$pidfile" ]; then
+            name=$(basename "$pidfile" .pid)
+            pid=$(cat "$pidfile")
+
+            if ps -p $pid > /dev/null 2>&1; then
+                echo -e "${YELLOW}Stopping $name (PID: $pid)...${NC}"
+                kill $pid 2>/dev/null || true
+
+                # Wait up to 10 seconds for graceful shutdown
+                count=0
+                while ps -p $pid > /dev/null 2>&1 && [ $count -lt 10 ]; do
+                    sleep 1
+                    count=$((count + 1))
+                done
+
+                # Force kill if still running
+                if ps -p $pid > /dev/null 2>&1; then
+                    echo -e "${RED}Force killing $name...${NC}"
+                    kill -9 $pid 2>/dev/null || true
+                fi
+
+                echo -e "${GREEN}Stopped $name${NC}"
+            else
+                echo -e "${YELLOW}$name (PID: $pid) not running${NC}"
+            fi
+
+            rm "$pidfile"
+        fi
+    done
+
+    # Clean up empty .pids directory
+    rmdir .pids 2>/dev/null || true
+else
+    echo -e "${YELLOW}No PID files found${NC}"
+fi
+
+# 1b. Kill any remaining olorin-project processes (catch stragglers not tracked in .pids)
+echo -e "\n${YELLOW}Checking for remaining olorin-project processes...${NC}"
+
+# List of process patterns to kill
+process_patterns=(
+    "python3.*consumer.py"
+    "python3.*producer.py"
+    "python3.*ingest.py"
+    "python3.*pdf_tracker.py"
+    "python3.*ebook_tracker.py"
+    "python3.*txt_tracker.py"
+    "python3.*office_tracker.py"
+    "python3.*query.py"
+    "python3.*enrichener.py"
+)
+
+remaining_killed=0
+for pattern in "${process_patterns[@]}"; do
+    # Find matching processes (excluding this script and grep itself)
+    pids=$(ps aux | grep -E "$pattern" | grep -v grep | awk '{print $2}')
+
+    if [ ! -z "$pids" ]; then
+        echo -e "${YELLOW}Found remaining processes matching '$pattern':${NC}"
+        ps aux | grep -E "$pattern" | grep -v grep | awk '{print "  PID " $2 ": " $11 " " $12 " " $13}'
+
+        for pid in $pids; do
+            echo -e "${YELLOW}  Killing PID $pid...${NC}"
+            kill $pid 2>/dev/null || true
+            sleep 1
+
+            # Force kill if still running
+            if ps -p $pid > /dev/null 2>&1; then
+                echo -e "${RED}  Force killing PID $pid...${NC}"
+                kill -9 $pid 2>/dev/null || true
+            fi
+            remaining_killed=$((remaining_killed + 1))
+        done
+    fi
+done
+
+if [ $remaining_killed -eq 0 ]; then
+    echo -e "${GREEN}No remaining processes found${NC}"
+else
+    echo -e "${GREEN}Killed $remaining_killed remaining process(es)${NC}"
+fi
+
+# 2. Stop containers
+echo -e "\n${YELLOW}Stopping containers...${NC}"
+
+# Stop Kafka
+if podman ps -a --format "{{.Names}}" | grep -q "^kafkaserver$"; then
+    echo -e "${YELLOW}Stopping kafkaserver...${NC}"
+    podman stop kafkaserver 2>/dev/null || true
+    podman rm kafkaserver 2>/dev/null || true
+    echo -e "${GREEN}Stopped kafkaserver${NC}"
+else
+    echo -e "${YELLOW}kafkaserver not running${NC}"
+fi
+
+# Stop ChromaDB
+if podman ps -a --format "{{.Names}}" | grep -q "^chromadb$"; then
+    echo -e "${YELLOW}Stopping chromadb...${NC}"
+    podman stop chromadb 2>/dev/null || true
+    podman rm chromadb 2>/dev/null || true
+    echo -e "${GREEN}Stopped chromadb${NC}"
+else
+    echo -e "${YELLOW}chromadb not running${NC}"
+fi
+
+# Summary and Verification
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}All components stopped successfully!${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+
+# Verify no processes are still running
+echo "Verification:"
+echo -e "${YELLOW}Checking for any remaining olorin processes...${NC}"
+remaining=$(ps aux | grep -E "python3.*(consumer|producer|ingest|pdf_tracker|ebook_tracker|txt_tracker|office_tracker|query|enrichener)\.py" | grep -v grep || true)
+if [ -z "$remaining" ]; then
+    echo -e "  ${GREEN}✓ No Python processes running${NC}"
+else
+    echo -e "  ${RED}✗ WARNING: Some processes still running:${NC}"
+    echo "$remaining"
+fi
+
+echo ""
+echo "Running containers:"
+running_containers=$(podman ps --format "{{.Names}}" | grep -E "^(kafkaserver|chromadb)$" || true)
+if [ -z "$running_containers" ]; then
+    echo -e "  ${GREEN}✓ No containers running${NC}"
+else
+    echo -e "  ${RED}✗ Containers still running:${NC}"
+    echo "$running_containers"
+fi
+echo ""
+echo "Useful commands:"
+echo "  - Check status:  ./status"
+echo "  - Start system:  ./up"

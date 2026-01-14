@@ -1,0 +1,4 @@
+#!/bin/bash
+# List all Kafka topics
+
+kafka-topics --list --bootstrap-server localhost:9092

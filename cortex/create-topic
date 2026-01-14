@@ -1,0 +1,15 @@
+#!/bin/bash
+# Create the 'prompts' Kafka topic
+
+TOPIC_NAME=${1:-prompts}
+PARTITIONS=${2:-1}
+REPLICATION_FACTOR=${3:-1}
+
+kafka-topics --create \
+  --topic "$TOPIC_NAME" \
+  --bootstrap-server localhost:9092 \
+  --partitions "$PARTITIONS" \
+  --replication-factor "$REPLICATION_FACTOR" \
+  --if-not-exists
+
+echo "Topic '$TOPIC_NAME' created successfully (or already exists)"

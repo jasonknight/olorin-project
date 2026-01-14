@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""
+Status monitoring script for olorin-project infrastructure.
+Shows running containers, processes, and health checks.
+"""
+
+import subprocess
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from collections import defaultdict
+
+# ANSI color codes
+class Color:
+    GREEN = '\033[0;32m'
+    YELLOW = '\033[1;33m'
+    RED = '\033[0;31m'
+    BLUE = '\033[0;34m'
+    CYAN = '\033[0;36m'
+    MAGENTA = '\033[0;35m'
+    BOLD = '\033[1m'
+    NC = '\033[0m'  # No Color
+
+def print_header(text):
+    """Print a formatted header."""
+    width = 80
+    print(f"\n{Color.BOLD}{Color.CYAN}{'=' * width}{Color.NC}")
+    print(f"{Color.BOLD}{Color.CYAN}{text.center(width)}{Color.NC}")
+    print(f"{Color.BOLD}{Color.CYAN}{'=' * width}{Color.NC}\n")
+
+def print_section(text):
+    """Print a section header."""
+    print(f"\n{Color.BOLD}{Color.BLUE}▸ {text}{Color.NC}")
+    print(f"{Color.BLUE}{'─' * 78}{Color.NC}")
+
+def get_status_icon(is_healthy):
+    """Return a status icon based on health."""
+    if is_healthy:
+        return f"{Color.GREEN}✓{Color.NC}"
+    else:
+        return f"{Color.RED}✗{Color.NC}"
+
+def get_warning_icon():
+    """Return a warning icon."""
+    return f"{Color.YELLOW}⚠{Color.NC}"
+
+def check_containers():
+    """Check status of podman containers."""
+    containers = ['kafkaserver', 'chromadb']
+    container_info = []
+
+    for container_name in containers:
+        try:
+            # Check if container exists and is running
+            result = subprocess.run(
+                ['podman', 'ps', '--filter', f'name={container_name}', '--format', 'json'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+                if data:
+                    container = data[0]
+                    status = container.get('State', 'unknown')
+                    created = container.get('CreatedAt', 'unknown')
+                    ports = container.get('Ports', [])
+
+                    # Format ports
+                    port_str = ', '.join([f"{p.get('host_port', '?')}->{p.get('container_port', '?')}"
+                                          for p in ports]) if ports else 'N/A'
+
+                    container_info.append({
+                        'name': container_name,
+                        'status': status,
+                        'healthy': status == 'running',
+                        'ports': port_str,
+                        'created': created
+                    })
+                else:
+                    container_info.append({
+                        'name': container_name,
+                        'status': 'not running',
+                        'healthy': False,
+                        'ports': 'N/A',
+                        'created': 'N/A'
+                    })
+            else:
+                container_info.append({
+                    'name': container_name,
+                    'status': 'not running',
+                    'healthy': False,
+                    'ports': 'N/A',
+                    'created': 'N/A'
+                })
+        except Exception as e:
+            container_info.append({
+                'name': container_name,
+                'status': f'error: {str(e)}',
+                'healthy': False,
+                'ports': 'N/A',
+                'created': 'N/A'
+            })
+
+    return container_info
+
+def check_processes():
+    """Check status of background processes."""
+    pids_dir = Path('.pids')
+    process_info = []
+
+    if not pids_dir.exists():
+        return process_info
+
+    for pid_file in pids_dir.glob('*.pid'):
+        name = pid_file.stem
+        try:
+            with open(pid_file, 'r') as f:
+                pid = int(f.read().strip())
+
+            # Check if process is running
+            try:
+                subprocess.run(['ps', '-p', str(pid)],
+                             capture_output=True,
+                             check=True,
+                             timeout=2)
+                is_running = True
+
+                # Get process info
+                result = subprocess.run(
+                    ['ps', '-o', 'pid,etime,rss', '-p', str(pid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    parts = lines[1].split()
+                    uptime = parts[1] if len(parts) > 1 else 'unknown'
+                    memory = f"{int(parts[2]) // 1024}MB" if len(parts) > 2 else 'unknown'
+                else:
+                    uptime = 'unknown'
+                    memory = 'unknown'
+
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                is_running = False
+                uptime = 'N/A'
+                memory = 'N/A'
+
+            process_info.append({
+                'name': name,
+                'pid': pid,
+                'running': is_running,
+                'uptime': uptime,
+                'memory': memory
+            })
+        except Exception as e:
+            process_info.append({
+                'name': name,
+                'pid': 'error',
+                'running': False,
+                'uptime': 'N/A',
+                'memory': 'N/A',
+                'error': str(e)
+            })
+
+    return process_info
+
+def analyze_logs(tail_lines=50):
+    """Analyze log files for errors and warnings."""
+    logs_dir = Path('logs')
+    log_analysis = defaultdict(lambda: {'errors': 0, 'warnings': 0, 'recent_issues': []})
+
+    if not logs_dir.exists():
+        return log_analysis
+
+    error_keywords = ['error', 'exception', 'failed', 'fatal', 'critical', 'traceback']
+    warning_keywords = ['warning', 'warn', 'deprecated']
+
+    for log_file in logs_dir.glob('*.log'):
+        name = log_file.stem
+        try:
+            # Read last N lines
+            result = subprocess.run(
+                ['tail', '-n', str(tail_lines), str(log_file)],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+
+            lines = result.stdout.split('\n')
+            for line in lines:
+                line_lower = line.lower()
+
+                # Check for errors
+                if any(keyword in line_lower for keyword in error_keywords):
+                    log_analysis[name]['errors'] += 1
+                    if len(log_analysis[name]['recent_issues']) < 3:
+                        # Truncate long lines
+                        truncated = line[:100] + '...' if len(line) > 100 else line
+                        log_analysis[name]['recent_issues'].append(('error', truncated))
+
+                # Check for warnings
+                elif any(keyword in line_lower for keyword in warning_keywords):
+                    log_analysis[name]['warnings'] += 1
+                    if len(log_analysis[name]['recent_issues']) < 3:
+                        truncated = line[:100] + '...' if len(line) > 100 else line
+                        log_analysis[name]['recent_issues'].append(('warning', truncated))
+
+        except Exception as e:
+            log_analysis[name]['error'] = str(e)
+
+    return log_analysis
+
+def print_containers(containers):
+    """Print container status table."""
+    print_section("Container Status")
+
+    if not containers:
+        print(f"  {Color.YELLOW}No containers found{Color.NC}")
+        return
+
+    # Header
+    print(f"  {'':2} {'Name':<15} {'Status':<12} {'Ports':<25} {'Created':<20}")
+    print(f"  {'-' * 76}")
+
+    # Rows
+    for container in containers:
+        icon = get_status_icon(container['healthy'])
+        status_color = Color.GREEN if container['healthy'] else Color.RED
+        print(f"  {icon}  {container['name']:<15} "
+              f"{status_color}{container['status']:<12}{Color.NC} "
+              f"{container['ports']:<25} {container['created']:<20}")
+
+def print_processes(processes):
+    """Print process status table."""
+    print_section("Background Processes")
+
+    if not processes:
+        print(f"  {Color.YELLOW}No background processes found{Color.NC}")
+        print(f"  {Color.YELLOW}Hint: Have you run './up' yet?{Color.NC}")
+        return
+
+    # Header
+    print(f"  {'':2} {'Name':<30} {'PID':<8} {'Uptime':<12} {'Memory':<10}")
+    print(f"  {'-' * 76}")
+
+    # Rows
+    for proc in processes:
+        icon = get_status_icon(proc['running'])
+        status_color = Color.GREEN if proc['running'] else Color.RED
+        pid_str = str(proc['pid']) if proc['pid'] != 'error' else 'ERROR'
+        print(f"  {icon}  {proc['name']:<30} "
+              f"{status_color}{pid_str:<8}{Color.NC} "
+              f"{proc['uptime']:<12} {proc['memory']:<10}")
+
+def print_log_health(log_analysis):
+    """Print log health analysis."""
+    print_section("Log Health (last 50 lines)")
+
+    if not log_analysis:
+        print(f"  {Color.YELLOW}No logs found{Color.NC}")
+        return
+
+    # Header
+    print(f"  {'':2} {'Component':<30} {'Errors':<10} {'Warnings':<10} {'Status'}")
+    print(f"  {'-' * 76}")
+
+    # Rows
+    for name, analysis in sorted(log_analysis.items()):
+        errors = analysis['errors']
+        warnings = analysis['warnings']
+
+        # Determine status
+        if errors > 0:
+            icon = get_status_icon(False)
+            status = f"{Color.RED}Issues detected{Color.NC}"
+        elif warnings > 0:
+            icon = get_warning_icon()
+            status = f"{Color.YELLOW}Warnings present{Color.NC}"
+        else:
+            icon = get_status_icon(True)
+            status = f"{Color.GREEN}Healthy{Color.NC}"
+
+        error_str = f"{Color.RED}{errors}{Color.NC}" if errors > 0 else str(errors)
+        warning_str = f"{Color.YELLOW}{warnings}{Color.NC}" if warnings > 0 else str(warnings)
+
+        print(f"  {icon}  {name:<30} {error_str:<19} {warning_str:<19} {status}")
+
+        # Print recent issues
+        if analysis['recent_issues']:
+            for issue_type, issue_line in analysis['recent_issues']:
+                issue_color = Color.RED if issue_type == 'error' else Color.YELLOW
+                print(f"      {issue_color}└─ {issue_line}{Color.NC}")
+
+def print_summary(containers, processes, log_analysis):
+    """Print overall system summary."""
+    print_section("System Summary")
+
+    # Count healthy components
+    healthy_containers = sum(1 for c in containers if c['healthy'])
+    total_containers = len(containers)
+
+    healthy_processes = sum(1 for p in processes if p['running'])
+    total_processes = len(processes)
+
+    log_errors = sum(a['errors'] for a in log_analysis.values())
+    log_warnings = sum(a['warnings'] for a in log_analysis.values())
+
+    # Overall health
+    all_healthy = (healthy_containers == total_containers and
+                   healthy_processes == total_processes and
+                   log_errors == 0)
+
+    if all_healthy:
+        overall_status = f"{Color.GREEN}✓ HEALTHY{Color.NC}"
+    elif log_errors > 0:
+        overall_status = f"{Color.RED}✗ DEGRADED (errors detected){Color.NC}"
+    elif healthy_containers < total_containers or healthy_processes < total_processes:
+        overall_status = f"{Color.RED}✗ DEGRADED (services down){Color.NC}"
+    else:
+        overall_status = f"{Color.YELLOW}⚠ WARNING (check logs){Color.NC}"
+
+    print(f"\n  Overall Status: {overall_status}")
+    print(f"\n  Containers:    {healthy_containers}/{total_containers} running")
+    print(f"  Processes:     {healthy_processes}/{total_processes} running")
+    print(f"  Log Issues:    {Color.RED if log_errors > 0 else ''}{log_errors} errors{Color.NC}, "
+          f"{Color.YELLOW if log_warnings > 0 else ''}{log_warnings} warnings{Color.NC}")
+
+    # Quick actions
+    print(f"\n  {Color.BOLD}Quick Actions:{Color.NC}")
+    if total_processes == 0:
+        print(f"    • Start system:  {Color.CYAN}./up{Color.NC}")
+    elif healthy_processes < total_processes:
+        print(f"    • Restart:       {Color.CYAN}./down && ./up{Color.NC}")
+    print(f"    • View logs:     {Color.CYAN}ls logs/{Color.NC}")
+    print(f"    • Stop system:   {Color.CYAN}./down{Color.NC}")
+
+def main():
+    """Main status check function."""
+    try:
+        print_header("OLORIN-PROJECT STATUS MONITOR")
+        print(f"  Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        # Gather all information
+        print(f"{Color.CYAN}Gathering system information...{Color.NC}")
+        containers = check_containers()
+        processes = check_processes()
+        log_analysis = analyze_logs()
+
+        # Display results
+        print_containers(containers)
+        print_processes(processes)
+        print_log_health(log_analysis)
+        print_summary(containers, processes, log_analysis)
+
+        print(f"\n{Color.BOLD}{Color.CYAN}{'=' * 80}{Color.NC}\n")
+
+    except KeyboardInterrupt:
+        print(f"\n\n{Color.YELLOW}Status check interrupted{Color.NC}")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n{Color.RED}Error running status check: {e}{Color.NC}")
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,23 @@
+# Core dependencies
+python-dotenv>=1.0.0
+chromadb>=0.4.22
+sentence-transformers>=2.3.1
+kafka-python==2.0.2
+openai>=1.0.0
+requests>=2.28.0
+
+# Text processing
+markdown>=3.5.0
+langchain>=0.1.0
+langchain-text-splitters>=0.0.1
+
+# Ebook processing
+ebooklib>=0.18
+mobi>=0.3.3
+
+# Office document processing
+python-docx>=1.1.0
+odfpy>=1.4.1
+
+# Utilities
+watchdog>=4.0.0

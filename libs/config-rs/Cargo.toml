@@ -1,0 +1,10 @@
+[package]
+name = "olorin-config"
+version = "0.1.0"
+edition = "2021"
+description = "Unified configuration library for Olorin Project"
+authors = ["Olorin Project"]
+
+[dependencies]
+thiserror = "1.0"
+dirs = "5.0"

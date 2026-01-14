@@ -1,0 +1,13 @@
+#!/bin/bash
+
+echo "Configuring topic 'ai_out' to use LogAppendTime (broker-assigned timestamps)..."
+podman exec -it kafkaserver /opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+  --entity-type topics \
+  --entity-name ai_out \
+  --alter \
+  --add-config message.timestamp.type=LogAppendTime
+
+echo ""
+echo "✓ Configuration updated!"
+echo "Messages will now use broker time instead of client time."
+echo "This prevents timestamp validation errors due to clock skew."

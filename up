@@ -1,0 +1,183 @@
+#!/bin/bash
+# Orchestration script to bring up all olorin-project components
+
+set -e
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Create directories for PIDs and logs
+mkdir -p .pids
+mkdir -p logs
+
+echo -e "${GREEN}Starting olorin-project infrastructure...${NC}"
+
+# Function to wait for a container to be healthy
+wait_for_container() {
+    local container_name=$1
+    local max_wait=30
+    local count=0
+
+    echo -e "${YELLOW}Waiting for $container_name to be ready...${NC}"
+    while [ $count -lt $max_wait ]; do
+        if podman ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
+            echo -e "${GREEN}$container_name is running${NC}"
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+    done
+
+    echo -e "${RED}Timeout waiting for $container_name${NC}"
+    return 1
+}
+
+# Function to start a Python script in the background
+start_daemon() {
+    local name=$1
+    local dir=$2
+    local script=$3
+    local venv_required=$4
+
+    echo -e "${YELLOW}Starting $name...${NC}"
+
+    cd "$dir"
+
+    if [ "$venv_required" = "true" ]; then
+        # Check if virtual environment exists
+        if [ ! -d "venv" ]; then
+            echo -e "${YELLOW}Creating virtual environment for $name...${NC}"
+            python3 -m venv venv
+        fi
+
+        source venv/bin/activate
+
+        # Always install/update requirements
+        echo -e "${YELLOW}Installing requirements for $name...${NC}"
+        pip install -q -r requirements.txt > "../logs/${name}_setup.log" 2>&1
+
+        # Start the script with venv activated (-u for unbuffered output)
+        nohup python3 -u "$script" > "../logs/${name}.log" 2>&1 &
+    else
+        # Start the script without venv (-u for unbuffered output)
+        nohup python3 -u "$script" > "../logs/${name}.log" 2>&1 &
+    fi
+
+    local pid=$!
+    echo $pid > "../.pids/${name}.pid"
+    echo -e "${GREEN}Started $name (PID: $pid)${NC}"
+
+    cd - > /dev/null
+}
+
+# 1. Start Broca (Kafka)
+echo -e "\n${GREEN}=== Starting Broca (Kafka) ===${NC}"
+cd broca
+podman stop kafkaserver 2>/dev/null || true
+podman rm kafkaserver 2>/dev/null || true
+
+# Check if kafkanet exists, create if not
+if ! podman network exists kafkanet 2>/dev/null; then
+    echo -e "${YELLOW}Creating kafkanet network...${NC}"
+    podman network create kafkanet
+fi
+
+podman run \
+  -d \
+  --net kafkanet \
+  --name kafkaserver \
+  -p 9092-9093:9092-9093 \
+  -e KAFKA_NODE_ID=1 \
+  -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafkaserver:9093 \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+  -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+  docker.io/apache/kafka:4.1.0
+
+cd ..
+wait_for_container "kafkaserver"
+sleep 5  # Give Kafka extra time to initialize
+
+# 2. Start Hippocampus (ChromaDB)
+echo -e "\n${GREEN}=== Starting Hippocampus (ChromaDB) ===${NC}"
+cd hippocampus
+mkdir -p ./data
+podman stop chromadb 2>/dev/null || true
+podman rm chromadb 2>/dev/null || true
+
+podman run \
+  -d \
+  --name chromadb \
+  -p 8000:8000 \
+  -v ./data:/data \
+  -e IS_PERSISTENT=TRUE \
+  docker.io/chromadb/chroma:latest
+
+cd ..
+wait_for_container "chromadb"
+sleep 2  # Give ChromaDB time to initialize
+
+# 3. Start Exo (AI inference)
+echo -e "\n${GREEN}=== Starting Exo (AI Inference) ===${NC}"
+
+# 4. Start all consumer and tracking scripts
+echo -e "\n${GREEN}=== Starting Consumer Scripts ===${NC}"
+
+# Start Cortex consumer
+start_daemon "cortex-consumer" "cortex" "consumer.py" "true"
+
+# Start Broca consumer
+start_daemon "broca-consumer" "broca" "consumer.py" "true"
+
+# Start Hippocampus pdf_tracker
+start_daemon "hippocampus-pdf-tracker" "hippocampus" "pdf_tracker.py" "true"
+
+# Start Hippocampus ebook_tracker (EPUB/MOBI)
+start_daemon "hippocampus-ebook-tracker" "hippocampus" "ebook_tracker.py" "true"
+
+# Start Hippocampus txt_tracker (TXT to MD)
+start_daemon "hippocampus-txt-tracker" "hippocampus" "txt_tracker.py" "true"
+
+# Start Hippocampus office_tracker (DOC/DOCX/ODT to MD)
+start_daemon "hippocampus-office-tracker" "hippocampus" "office_tracker.py" "true"
+
+# Start Hippocampus ingest
+start_daemon "hippocampus-ingest" "hippocampus" "ingest.py" "true"
+
+# Start Hippocampus enrichener (prompt enrichment with ChromaDB context)
+start_daemon "hippocampus-enrichener" "hippocampus" "enrichener.py" "true"
+
+# Summary
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}All components started successfully!${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+echo "Containers running:"
+podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+echo ""
+echo "Background processes:"
+for pidfile in .pids/*.pid; do
+    if [ -f "$pidfile" ]; then
+        name=$(basename "$pidfile" .pid)
+        pid=$(cat "$pidfile")
+        if ps -p $pid > /dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} $name (PID: $pid)"
+        else
+            echo -e "  ${RED}✗${NC} $name (PID: $pid - not running)"
+        fi
+    fi
+done
+echo ""
+echo "Logs available in logs/ directory"
+echo ""
+echo "Useful commands:"
+echo "  - Check status:  ./status"
+echo "  - Stop system:   ./down"
