@@ -152,14 +152,14 @@ tail -f logs/hippocampus-pdf-tracker.log
 - `producer.py` - Interactive REPL for testing
 - `output/` - Generated audio files
 
-**Configuration** (in root `.env`):
-- `BROCA_KAFKA_TOPIC` - Input topic (default: ai_out)
-- `BROCA_CONSUMER_GROUP` - Consumer group (default: tts-consumer-group)
-- `TTS_MODEL_NAME` - Coqui TTS model (default: tts_models/en/vctk/vits)
-- `TTS_SPEAKER` - Voice selection (default: p272)
+**Configuration** (in `settings.json` `broca` section):
+- `kafka_topic` - Input topic (default: ai_out)
+- `consumer_group` - Consumer group (default: tts-consumer-group)
+- `tts.model_name` - Coqui TTS model (default: tts_models/en/vctk/vits)
+- `tts.speaker` - Voice selection (default: p272)
 
 **Features**:
-- Hot-reload on `.env` changes
+- Hot-reload on `settings.json` changes
 - Multi-speaker TTS support
 - Timestamps audio files
 
@@ -171,14 +171,14 @@ tail -f logs/hippocampus-pdf-tracker.log
 - `consumer.py` - Consumes prompts, calls Exo API, produces responses
 - `producer.py` - Interactive REPL for sending prompts
 
-**Configuration** (in root `.env`):
-- `CORTEX_INPUT_TOPIC` - Input topic (default: prompts)
-- `CORTEX_OUTPUT_TOPIC` - Output topic (default: ai_out)
-- `CORTEX_CONSUMER_GROUP` - Consumer group (default: exo-consumer-group)
-- `EXO_BASE_URL` - Exo API endpoint (default: http://localhost:52415/v1)
-- `MODEL_NAME` - AI model name (auto-detect if empty)
-- `TEMPERATURE` - Response randomness (0.0-2.0)
-- `MAX_TOKENS` - Maximum response length
+**Configuration** (in `settings.json` `cortex` and `exo` sections):
+- `cortex.input_topic` - Input topic (default: prompts)
+- `cortex.output_topic` - Output topic (default: ai_out)
+- `cortex.consumer_group` - Consumer group (default: exo-consumer-group)
+- `exo.base_url` - Exo API endpoint (default: http://localhost:52415/v1)
+- `exo.model_name` - AI model name (auto-detect if null)
+- `exo.temperature` - Response randomness (0.0-2.0)
+- `exo.max_tokens` - Maximum response length
 
 **Features**:
 - OpenAI-compatible API client
@@ -202,15 +202,15 @@ tail -f logs/hippocampus-pdf-tracker.log
 - `txt_tracker.py` - TXT file monitoring and conversion to markdown
 - `office_tracker.py` - Office document (DOC/DOCX/ODT) monitoring and conversion
 
-**Configuration** (in root `.env`):
-- `INPUT_DIR` - Directory to monitor (default: ~/Documents/AI_IN)
-- `CHROMADB_HOST` - ChromaDB server (default: localhost)
-- `CHROMADB_PORT` - ChromaDB port (default: 8000)
-- `CHROMADB_COLLECTION` - Collection name (default: documents)
-- `EMBEDDING_MODEL` - sentence-transformers model (default: all-MiniLM-L6-v2)
-- `CHUNK_SIZE` - Target chunk size in characters (default: 1000)
-- `CHUNK_OVERLAP` - Overlap between chunks (default: 200)
-- `POLL_INTERVAL` - Seconds between directory scans (default: 5)
+**Configuration** (in `settings.json` `hippocampus` section):
+- `input_dir` - Directory to monitor (default: ~/Documents/AI_IN)
+- `chromadb.host` - ChromaDB server (default: localhost)
+- `chromadb.port` - ChromaDB port (default: 8000)
+- `chromadb.collection` - Collection name (default: documents)
+- `embedding_model` - sentence-transformers model (default: all-MiniLM-L6-v2)
+- `chunking.size` - Target chunk size in characters (default: 1000)
+- `chunking.overlap` - Overlap between chunks (default: 200)
+- `poll_interval` - Seconds between directory scans (default: 5)
 
 **Features**:
 - Continuous file monitoring
@@ -241,8 +241,23 @@ tail -f logs/hippocampus-pdf-tracker.log
 
 ### Configuration Management
 
-**Unified Configuration**: All configuration is stored in a single `.env` file at the project root. A shared configuration library (`libs/config.py`) provides type-safe access with hot-reload support.
+**Unified Configuration**: All configuration is stored in `settings.json` at the project root. A shared configuration library (`libs/config.py` for Python, `libs/config-rs` for Rust) provides type-safe access with hot-reload support. Falls back to `.env` if `settings.json` doesn't exist.
 
+**Configuration Format** (`settings.json`):
+```json
+{
+  "global": { "log_level": "INFO" },
+  "kafka": { "bootstrap_servers": "localhost:9092" },
+  "exo": { "base_url": "http://localhost:52415/v1", "temperature": 0.7 },
+  "broca": { "kafka_topic": "ai_out", "tts": { "model_name": "...", "speaker": "p272" } },
+  "cortex": { "input_topic": "prompts", "output_topic": "ai_out" },
+  "hippocampus": { "input_dir": "~/Documents/AI_IN", "chromadb": { "host": "localhost", "port": 8000 } },
+  "enrichener": { "input_topic": "ai_in", "output_topic": "prompts" },
+  "chat": { "history_enabled": true, "reset_patterns": ["/reset", "start over"] }
+}
+```
+
+**Python Usage**:
 ```python
 from libs.config import Config
 
@@ -251,18 +266,35 @@ host = config.get('CHROMADB_HOST', 'localhost')
 port = config.get_int('CHROMADB_PORT', 8000)
 enabled = config.get_bool('REPROCESS_ON_CHANGE', True)
 path = config.get_path('INPUT_DIR', '~/Documents/AI_IN')
+patterns = config.get_list('CHAT_RESET_PATTERNS', [])
+```
+
+**Rust Usage**:
+```rust
+use olorin_config::Config;
+
+let config = Config::new(None, true)?;  // Enable hot-reload
+let host = config.get("CHROMADB_HOST", Some("localhost"));
+let port = config.get_int("CHROMADB_PORT", Some(8000));
+let enabled = config.get_bool("REPROCESS_ON_CHANGE", true);
+let path = config.get_path("INPUT_DIR", Some("~/Documents/AI_IN"));
+let patterns = config.get_list("CHAT_RESET_PATTERNS", None);
 ```
 
 **Config Library Features**:
 - `config.get(key, default)` - Get string value
 - `config.get_int(key, default)` - Get integer value
 - `config.get_float(key, default)` - Get float value
-- `config.get_bool(key, default)` - Get boolean (true/yes/1/on = True)
+- `config.get_bool(key, default)` - Get boolean (native JSON bool or string: true/yes/1/on)
 - `config.get_path(key, default)` - Get path with ~ expansion
+- `config.get_list(key, default)` - Get list (native JSON array or comma-separated string)
 - `config.set(key, value)` - In-memory override
 - `config.reload()` - Hot-reload if file changed (returns True if reloaded)
+- `config.config_path` - Path to active config file (settings.json or .env)
 
-**Hot-Reload**: Consumer components (broca, cortex, enrichener) detect changes to the root `.env` file and automatically reload configuration without restarting.
+**Backward Compatibility**: Flat keys like `CHROMADB_PORT` are automatically mapped to nested JSON paths like `hippocampus.chromadb.port`. Existing code using flat keys continues to work without changes.
+
+**Hot-Reload**: Consumer components (broca, cortex, enrichener) detect changes to `settings.json` and automatically reload configuration without restarting.
 
 ### Process Management
 
@@ -282,12 +314,13 @@ Each component (broca, cortex, hippocampus) is its own git repository. The root 
 
 When adding a new component:
 1. Create directory with its own `venv/`
-2. Add configuration keys to root `.env` file (prefix with component name)
-3. Import `from libs.config import Config` to access configuration
-4. Create `requirements.txt` for dependencies
-5. Update `./up` to start the daemon
-6. Update `./down` to stop the daemon
-7. Update `./status` to monitor the component
+2. Add configuration section to root `settings.json` file
+3. Add key mappings to `libs/config.py` and `libs/config-rs/src/lib.rs` for backward compatibility
+4. Import `from libs.config import Config` to access configuration
+5. Create `requirements.txt` for dependencies
+6. Update `./up` to start the daemon
+7. Update `./down` to stop the daemon
+8. Update `./status` to monitor the component
 
 ### Kafka Topic Management
 
@@ -310,7 +343,7 @@ The project uses pytest with fixtures. Test structure:
 1. Check logs in `logs/` directory
 2. Use `./status` to see process health and recent errors
 3. Test components individually before running full system
-4. Set `LOG_LEVEL=DEBUG` in root `.env` for verbose logging (applies to all components)
+4. Set `"log_level": "DEBUG"` in `settings.json` `global` section for verbose logging (applies to all components)
 
 ### Common Issues
 

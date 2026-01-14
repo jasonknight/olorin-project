@@ -1,6 +1,7 @@
 //! Unified Configuration Library for Olorin Project
 //!
 //! Provides a Config struct with type-safe getters and optional hot-reload support.
+//! Reads from settings.json (preferred) or falls back to .env for backward compatibility.
 //!
 //! # Usage
 //!
@@ -12,6 +13,7 @@
 //! let port = config.get_int("CHROMADB_PORT", Some(8000));
 //! let enabled = config.get_bool("FEATURE_ENABLED", false);
 //! let path = config.get_path("INPUT_DIR", Some("~/Documents"));
+//! let patterns = config.get_list("CHAT_RESET_PATTERNS", None);
 //!
 //! // With hot-reload support
 //! let mut config = Config::new(None, true).unwrap();
@@ -21,31 +23,96 @@
 //! ```
 
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+use serde_json::Value;
+
 /// Error types for configuration operations
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("Failed to read .env file: {0}")]
+    #[error("Failed to read config file: {0}")]
     IoError(#[from] io::Error),
+
+    #[error("Failed to parse JSON: {0}")]
+    JsonError(#[from] serde_json::Error),
 
     #[error("Failed to find project root")]
     ProjectRootNotFound,
 }
 
-/// Find the project root by looking for the .env file or known directories.
+/// Mapping from flat keys to JSON paths for backward compatibility
+fn key_to_path(key: &str) -> Option<&'static str> {
+    match key {
+        // Global
+        "LOG_LEVEL" => Some("global.log_level"),
+        "LOG_DIR" => Some("global.log_dir"),
+        // Kafka
+        "KAFKA_BOOTSTRAP_SERVERS" => Some("kafka.bootstrap_servers"),
+        "KAFKA_SEND_TIMEOUT" => Some("kafka.send_timeout"),
+        "KAFKA_MAX_RETRIES" => Some("kafka.max_retries"),
+        // Exo
+        "EXO_BASE_URL" => Some("exo.base_url"),
+        "EXO_API_KEY" => Some("exo.api_key"),
+        "MODEL_NAME" => Some("exo.model_name"),
+        "TEMPERATURE" => Some("exo.temperature"),
+        "MAX_TOKENS" => Some("exo.max_tokens"),
+        // Broca
+        "BROCA_KAFKA_TOPIC" => Some("broca.kafka_topic"),
+        "BROCA_CONSUMER_GROUP" => Some("broca.consumer_group"),
+        "BROCA_AUTO_OFFSET_RESET" => Some("broca.auto_offset_reset"),
+        "TTS_MODEL_NAME" => Some("broca.tts.model_name"),
+        "TTS_SPEAKER" => Some("broca.tts.speaker"),
+        "TTS_OUTPUT_DIR" => Some("broca.tts.output_dir"),
+        // Cortex
+        "CORTEX_INPUT_TOPIC" => Some("cortex.input_topic"),
+        "CORTEX_OUTPUT_TOPIC" => Some("cortex.output_topic"),
+        "CORTEX_CONSUMER_GROUP" => Some("cortex.consumer_group"),
+        "CORTEX_AUTO_OFFSET_RESET" => Some("cortex.auto_offset_reset"),
+        // Hippocampus
+        "INPUT_DIR" => Some("hippocampus.input_dir"),
+        "CHROMADB_HOST" => Some("hippocampus.chromadb.host"),
+        "CHROMADB_PORT" => Some("hippocampus.chromadb.port"),
+        "CHROMADB_COLLECTION" => Some("hippocampus.chromadb.collection"),
+        "EMBEDDING_MODEL" => Some("hippocampus.embedding_model"),
+        "CHUNK_SIZE" => Some("hippocampus.chunking.size"),
+        "CHUNK_OVERLAP" => Some("hippocampus.chunking.overlap"),
+        "CHUNK_MIN_SIZE" => Some("hippocampus.chunking.min_size"),
+        "POLL_INTERVAL" => Some("hippocampus.poll_interval"),
+        "TRACKING_DB" => Some("hippocampus.tracking_db"),
+        "REPROCESS_ON_CHANGE" => Some("hippocampus.reprocess_on_change"),
+        "DELETE_AFTER_PROCESSING" => Some("hippocampus.delete_after_processing"),
+        "LOG_FILE" => Some("hippocampus.log_file"),
+        // Enrichener
+        "ENRICHENER_INPUT_TOPIC" => Some("enrichener.input_topic"),
+        "ENRICHENER_OUTPUT_TOPIC" => Some("enrichener.output_topic"),
+        "ENRICHENER_CONSUMER_GROUP" => Some("enrichener.consumer_group"),
+        "ENRICHENER_AUTO_OFFSET_RESET" => Some("enrichener.auto_offset_reset"),
+        "ENRICHENER_THREAD_POOL_SIZE" => Some("enrichener.thread_pool_size"),
+        "LLM_TIMEOUT_SECONDS" => Some("enrichener.llm_timeout_seconds"),
+        "DECISION_TEMPERATURE" => Some("enrichener.decision_temperature"),
+        "CHROMADB_QUERY_N_RESULTS" => Some("enrichener.chromadb_query_n_results"),
+        "CONTEXT_DB_PATH" => Some("enrichener.context_db_path"),
+        "CLEANUP_CONTEXT_AFTER_USE" => Some("enrichener.cleanup_context_after_use"),
+        // Chat
+        "CHAT_HISTORY_ENABLED" => Some("chat.history_enabled"),
+        "CHAT_DB_PATH" => Some("chat.db_path"),
+        "CHAT_RESET_PATTERNS" => Some("chat.reset_patterns"),
+        _ => None,
+    }
+}
+
+/// Find the project root by looking for settings.json or .env file.
 fn find_project_root() -> Option<PathBuf> {
     // Try to find from current executable location
-    if let Ok(exe_path) = env::current_exe() {
+    if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             let mut search = parent.to_path_buf();
             for _ in 0..10 {
-                if search.join(".env").exists() {
+                if search.join("settings.json").exists() || search.join(".env").exists() {
                     return Some(search);
                 }
                 if let Some(p) = search.parent() {
@@ -58,10 +125,10 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     // Fallback: search upward from current working directory
-    if let Ok(cwd) = env::current_dir() {
+    if let Ok(cwd) = std::env::current_dir() {
         let mut search = cwd;
         for _ in 0..10 {
-            if search.join(".env").exists() {
+            if search.join("settings.json").exists() || search.join(".env").exists() {
                 return Some(search);
             }
             if let Some(p) = search.parent() {
@@ -73,18 +140,21 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     // Last resort: return current working directory
-    env::current_dir().ok()
+    std::env::current_dir().ok()
 }
 
-/// Configuration manager that loads from a .env file.
+/// Configuration manager that loads from settings.json or .env file.
 ///
 /// Provides type-safe getters and optional hot-reload support for runtime
-/// configuration changes.
+/// configuration changes. Prefers settings.json if available, falls back to .env.
 pub struct Config {
+    json_path: PathBuf,
     env_path: PathBuf,
     watch: bool,
     mtime: Option<SystemTime>,
-    overrides: HashMap<String, String>,
+    overrides: HashMap<String, Value>,
+    data: Value,
+    using_json: bool,
 }
 
 impl Config {
@@ -92,42 +162,70 @@ impl Config {
     ///
     /// # Arguments
     ///
-    /// * `env_path` - Path to the .env file. Defaults to project root .env
+    /// * `config_path` - Path to settings.json or .env file. Defaults to project root.
     /// * `watch` - If true, enables hot-reload support via reload() method
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError` if the project root cannot be found when `env_path` is None.
-    pub fn new(env_path: Option<PathBuf>, watch: bool) -> Result<Self, ConfigError> {
-        let env_path = match env_path {
-            Some(p) => p,
-            None => {
-                let root = find_project_root().ok_or(ConfigError::ProjectRootNotFound)?;
-                root.join(".env")
+    /// Returns `ConfigError` if the project root cannot be found when `config_path` is None.
+    pub fn new(config_path: Option<PathBuf>, watch: bool) -> Result<Self, ConfigError> {
+        let root = find_project_root().ok_or(ConfigError::ProjectRootNotFound)?;
+
+        let (json_path, env_path) = match config_path {
+            Some(p) => {
+                if p.extension().is_some_and(|e| e == "json") {
+                    (p.clone(), p.with_extension("").with_file_name(".env"))
+                } else if p.file_name().is_some_and(|n| n == ".env") {
+                    (p.with_file_name("settings.json"), p)
+                } else {
+                    // Assume it's a directory
+                    (p.join("settings.json"), p.join(".env"))
+                }
             }
+            None => (root.join("settings.json"), root.join(".env")),
         };
 
         let mut config = Self {
+            json_path,
             env_path,
             watch,
             mtime: None,
             overrides: HashMap::new(),
+            data: Value::Null,
+            using_json: false,
         };
 
         config.load()?;
         Ok(config)
     }
 
-    /// Load the .env file into environment variables.
+    /// Load configuration from settings.json or fall back to .env.
     fn load(&mut self) -> Result<(), ConfigError> {
-        if !self.env_path.exists() {
+        // Prefer settings.json
+        if self.json_path.exists() {
+            let content = fs::read_to_string(&self.json_path)?;
+            self.data = serde_json::from_str(&content)?;
+            self.mtime = fs::metadata(&self.json_path)?.modified().ok();
+            self.using_json = true;
             return Ok(());
         }
 
-        self.mtime = fs::metadata(&self.env_path)?.modified().ok();
+        // Fall back to .env
+        if self.env_path.exists() {
+            self.data = self.parse_env_to_nested()?;
+            self.mtime = fs::metadata(&self.env_path)?.modified().ok();
+            self.using_json = false;
+        }
 
+        Ok(())
+    }
+
+    /// Parse .env file into nested JSON Value structure.
+    fn parse_env_to_nested(&self) -> Result<Value, ConfigError> {
         let file = fs::File::open(&self.env_path)?;
         let reader = io::BufReader::new(file);
+
+        let mut flat_data: HashMap<String, String> = HashMap::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -152,22 +250,84 @@ impl Config {
                     }
                 }
 
-                env::set_var(key, value);
+                flat_data.insert(key.to_string(), value.to_string());
             }
         }
 
-        Ok(())
+        // Convert flat keys to nested structure
+        let mut result = serde_json::Map::new();
+
+        for (flat_key, value) in flat_data {
+            if let Some(path) = key_to_path(&flat_key) {
+                self.set_nested(&mut result, path, Value::String(value));
+            } else {
+                // Store unknown keys at root level
+                result.insert(flat_key, Value::String(value));
+            }
+        }
+
+        Ok(Value::Object(result))
     }
 
-    /// Reload configuration if the .env file has changed.
+    /// Set a value in a nested JSON object using dot notation path.
+    fn set_nested(&self, obj: &mut serde_json::Map<String, Value>, path: &str, value: Value) {
+        let keys: Vec<&str> = path.split('.').collect();
+        let mut current = obj;
+
+        for (i, key) in keys.iter().enumerate() {
+            if i == keys.len() - 1 {
+                current.insert((*key).to_string(), value);
+                return;
+            }
+
+            if !current.contains_key(*key) {
+                current.insert((*key).to_string(), Value::Object(serde_json::Map::new()));
+            }
+
+            if let Some(Value::Object(next)) = current.get_mut(*key) {
+                current = next;
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// Get a value from nested JSON using dot notation path.
+    fn get_nested(&self, path: &str) -> Option<&Value> {
+        let keys: Vec<&str> = path.split('.').collect();
+        let mut current = &self.data;
+
+        for key in keys {
+            if let Value::Object(obj) = current {
+                current = obj.get(key)?;
+            } else {
+                return None;
+            }
+        }
+
+        Some(current)
+    }
+
+    /// Reload configuration if the config file has changed.
     ///
     /// Returns true if configuration was reloaded, false otherwise.
     pub fn reload(&mut self) -> bool {
-        if !self.watch || !self.env_path.exists() {
+        if !self.watch {
             return false;
         }
 
-        let current_mtime = fs::metadata(&self.env_path)
+        // Check the appropriate config file
+        let config_path = if self.json_path.exists() {
+            &self.json_path
+        } else {
+            &self.env_path
+        };
+
+        if !config_path.exists() {
+            return false;
+        }
+
+        let current_mtime = fs::metadata(config_path)
             .ok()
             .and_then(|m| m.modified().ok());
 
@@ -184,7 +344,7 @@ impl Config {
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key (flat like 'CHROMADB_PORT' or nested like 'hippocampus.chromadb.port')
     /// * `default` - Default value if not set
     ///
     /// # Returns
@@ -193,23 +353,64 @@ impl Config {
     pub fn get(&self, key: &str, default: Option<&str>) -> Option<String> {
         // Check overrides first
         if let Some(value) = self.overrides.get(key) {
-            return Some(value.clone());
+            return self.value_to_string(value);
         }
 
-        env::var(key).ok().or_else(|| default.map(String::from))
+        // Map flat key to nested path if known
+        let path = key_to_path(key).unwrap_or(key);
+        let value = self.get_nested(path);
+
+        match value {
+            Some(v) => self.value_to_string(v),
+            None => default.map(String::from),
+        }
+    }
+
+    /// Convert a JSON Value to String representation.
+    fn value_to_string(&self, value: &Value) -> Option<String> {
+        match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Array(arr) => {
+                let items: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| self.value_to_string(v))
+                    .collect();
+                Some(items.join(","))
+            }
+            Value::Null => None,
+            Value::Object(_) => None,
+        }
     }
 
     /// Get a configuration value as an integer.
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key
     /// * `default` - Default value if not set or invalid
     ///
     /// # Returns
     ///
     /// The configuration value as i64 or default
     pub fn get_int(&self, key: &str, default: Option<i64>) -> Option<i64> {
+        // Check overrides first
+        if let Some(value) = self.overrides.get(key) {
+            if let Some(n) = value.as_i64() {
+                return Some(n);
+            }
+        }
+
+        // Try nested path for native JSON int
+        let path = key_to_path(key).unwrap_or(key);
+        if let Some(value) = self.get_nested(path) {
+            if let Some(n) = value.as_i64() {
+                return Some(n);
+            }
+        }
+
+        // Fall back to string parsing
         match self.get(key, None) {
             Some(value) => value.parse().ok().or(default),
             None => default,
@@ -220,13 +421,29 @@ impl Config {
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key
     /// * `default` - Default value if not set or invalid
     ///
     /// # Returns
     ///
     /// The configuration value as f64 or default
     pub fn get_float(&self, key: &str, default: Option<f64>) -> Option<f64> {
+        // Check overrides first
+        if let Some(value) = self.overrides.get(key) {
+            if let Some(n) = value.as_f64() {
+                return Some(n);
+            }
+        }
+
+        // Try nested path for native JSON number
+        let path = key_to_path(key).unwrap_or(key);
+        if let Some(value) = self.get_nested(path) {
+            if let Some(n) = value.as_f64() {
+                return Some(n);
+            }
+        }
+
+        // Fall back to string parsing
         match self.get(key, None) {
             Some(value) => value.parse().ok().or(default),
             None => default,
@@ -236,24 +453,42 @@ impl Config {
     /// Get a configuration value as a boolean.
     ///
     /// Recognizes: true, yes, 1, on (case-insensitive) as true.
+    /// Native JSON booleans are handled directly.
     /// Everything else (including empty string) is false.
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key
     /// * `default` - Default value if not set
     ///
     /// # Returns
     ///
     /// The configuration value as bool or default
     pub fn get_bool(&self, key: &str, default: bool) -> bool {
-        match self.get(key, None) {
-            Some(value) => {
-                let lower = value.to_lowercase();
-                matches!(lower.as_str(), "true" | "yes" | "1" | "on")
+        // Check overrides first
+        if let Some(value) = self.overrides.get(key) {
+            if let Some(b) = value.as_bool() {
+                return b;
             }
-            None => default,
+            if let Some(s) = value.as_str() {
+                let lower = s.to_lowercase();
+                return matches!(lower.as_str(), "true" | "yes" | "1" | "on");
+            }
         }
+
+        // Try nested path for native JSON bool
+        let path = key_to_path(key).unwrap_or(key);
+        if let Some(value) = self.get_nested(path) {
+            if let Some(b) = value.as_bool() {
+                return b;
+            }
+            if let Some(s) = value.as_str() {
+                let lower = s.to_lowercase();
+                return matches!(lower.as_str(), "true" | "yes" | "1" | "on");
+            }
+        }
+
+        default
     }
 
     /// Get a configuration value as an expanded path.
@@ -262,7 +497,7 @@ impl Config {
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key
     /// * `default` - Default value if not set
     ///
     /// # Returns
@@ -273,33 +508,85 @@ impl Config {
 
         if value.starts_with('~') {
             if let Some(home) = dirs::home_dir() {
-                return Some(home.join(&value[1..].trim_start_matches('/')));
+                return Some(home.join(value[1..].trim_start_matches('/')));
             }
         }
 
         Some(PathBuf::from(value))
     }
 
-    /// Set a configuration value (in-memory only).
+    /// Get a configuration value as a list of strings.
     ///
-    /// This override takes precedence over environment variables.
-    /// Does not modify the .env file.
+    /// Native JSON arrays are returned directly.
+    /// Comma-separated strings are split into lists.
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key
+    /// * `default` - Default value if not set
+    ///
+    /// # Returns
+    ///
+    /// The configuration value as Vec<String> or default
+    pub fn get_list(&self, key: &str, default: Option<Vec<String>>) -> Option<Vec<String>> {
+        // Check overrides first
+        if let Some(value) = self.overrides.get(key) {
+            if let Some(arr) = value.as_array() {
+                return Some(
+                    arr.iter()
+                        .filter_map(|v| self.value_to_string(v))
+                        .collect(),
+                );
+            }
+            if let Some(s) = value.as_str() {
+                return Some(s.split(',').map(|s| s.trim().to_string()).collect());
+            }
+        }
+
+        // Try nested path for native JSON array
+        let path = key_to_path(key).unwrap_or(key);
+        if let Some(value) = self.get_nested(path) {
+            if let Some(arr) = value.as_array() {
+                return Some(
+                    arr.iter()
+                        .filter_map(|v| self.value_to_string(v))
+                        .collect(),
+                );
+            }
+            if let Some(s) = value.as_str() {
+                return Some(s.split(',').map(|s| s.trim().to_string()).collect());
+            }
+        }
+
+        default
+    }
+
+    /// Set a configuration value (in-memory only).
+    ///
+    /// This override takes precedence over file values.
+    /// Does not modify the config file.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The configuration key
     /// * `value` - The value to set
     pub fn set(&mut self, key: &str, value: &str) {
-        self.overrides.insert(key.to_string(), value.to_string());
+        self.overrides
+            .insert(key.to_string(), Value::String(value.to_string()));
+    }
+
+    /// Set a configuration value as a JSON Value (in-memory only).
+    pub fn set_value(&mut self, key: &str, value: Value) {
+        self.overrides.insert(key.to_string(), value);
     }
 
     /// Clear an in-memory override for a key.
     ///
-    /// After clearing, get() will return the environment variable value.
+    /// After clearing, get() will return the file value.
     ///
     /// # Arguments
     ///
-    /// * `key` - The environment variable name
+    /// * `key` - The configuration key
     pub fn clear_override(&mut self, key: &str) {
         self.overrides.remove(key);
     }
@@ -309,9 +596,18 @@ impl Config {
         self.overrides.clear();
     }
 
-    /// Return the path to the .env file.
+    /// Return the path to the active config file.
+    pub fn config_path(&self) -> &PathBuf {
+        if self.using_json {
+            &self.json_path
+        } else {
+            &self.env_path
+        }
+    }
+
+    /// Return the path to the config file (deprecated, use config_path).
     pub fn env_path(&self) -> &PathBuf {
-        &self.env_path
+        self.config_path()
     }
 }
 
@@ -357,22 +653,66 @@ mod tests {
         let mut file = File::create(&env_path).unwrap();
         writeln!(file, "# Comment line").unwrap();
         writeln!(file, "").unwrap();
-        writeln!(file, "TEST_STRING=hello").unwrap();
-        writeln!(file, "TEST_INT=42").unwrap();
-        writeln!(file, "TEST_FLOAT=3.14").unwrap();
-        writeln!(file, "TEST_BOOL=true").unwrap();
+        writeln!(file, "LOG_LEVEL=DEBUG").unwrap();
+        writeln!(file, "CHROMADB_PORT=9000").unwrap();
+        writeln!(file, "TEMPERATURE=0.5").unwrap();
+        writeln!(file, "REPROCESS_ON_CHANGE=true").unwrap();
         writeln!(file, "TEST_QUOTED=\"quoted value\"").unwrap();
         drop(file);
 
         let config = Config::new(Some(env_path), false).unwrap();
 
-        assert_eq!(config.get("TEST_STRING", None), Some("hello".to_string()));
-        assert_eq!(config.get_int("TEST_INT", None), Some(42));
-        assert_eq!(config.get_float("TEST_FLOAT", None), Some(3.14));
-        assert!(config.get_bool("TEST_BOOL", false));
+        assert_eq!(config.get("LOG_LEVEL", None), Some("DEBUG".to_string()));
+        assert_eq!(config.get_int("CHROMADB_PORT", None), Some(9000));
+        assert_eq!(config.get_float("TEMPERATURE", None), Some(0.5));
+        assert!(config.get_bool("REPROCESS_ON_CHANGE", false));
         assert_eq!(
             config.get("TEST_QUOTED", None),
             Some("quoted value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_json_config() {
+        let dir = tempdir().unwrap();
+        let json_path = dir.path().join("settings.json");
+
+        let json_content = r#"{
+            "global": {
+                "log_level": "WARNING"
+            },
+            "hippocampus": {
+                "chromadb": {
+                    "port": 9999
+                },
+                "reprocess_on_change": false
+            },
+            "exo": {
+                "temperature": 0.3
+            },
+            "chat": {
+                "reset_patterns": ["/reset", "start over"]
+            }
+        }"#;
+
+        let mut file = File::create(&json_path).unwrap();
+        write!(file, "{}", json_content).unwrap();
+        drop(file);
+
+        let config = Config::new(Some(json_path), false).unwrap();
+
+        assert_eq!(config.get("LOG_LEVEL", None), Some("WARNING".to_string()));
+        assert_eq!(config.get_int("CHROMADB_PORT", None), Some(9999));
+        assert!(!config.get_bool("REPROCESS_ON_CHANGE", true));
+        assert_eq!(config.get_float("TEMPERATURE", None), Some(0.3));
+        assert_eq!(
+            config.get_list("CHAT_RESET_PATTERNS", None),
+            Some(vec!["/reset".to_string(), "start over".to_string()])
+        );
+        // Arrays should also work via get() as comma-separated
+        assert_eq!(
+            config.get("CHAT_RESET_PATTERNS", None),
+            Some("/reset,start over".to_string())
         );
     }
 
@@ -400,65 +740,82 @@ mod tests {
         let env_path = dir.path().join(".env");
 
         let mut file = File::create(&env_path).unwrap();
-        writeln!(file, "MY_KEY=original").unwrap();
+        writeln!(file, "LOG_LEVEL=INFO").unwrap();
         drop(file);
 
         let mut config = Config::new(Some(env_path), false).unwrap();
 
-        assert_eq!(config.get("MY_KEY", None), Some("original".to_string()));
+        assert_eq!(config.get("LOG_LEVEL", None), Some("INFO".to_string()));
 
-        config.set("MY_KEY", "overridden");
-        assert_eq!(config.get("MY_KEY", None), Some("overridden".to_string()));
+        config.set("LOG_LEVEL", "ERROR");
+        assert_eq!(config.get("LOG_LEVEL", None), Some("ERROR".to_string()));
 
-        config.clear_override("MY_KEY");
-        assert_eq!(config.get("MY_KEY", None), Some("original".to_string()));
+        config.clear_override("LOG_LEVEL");
+        assert_eq!(config.get("LOG_LEVEL", None), Some("INFO".to_string()));
     }
 
     #[test]
     fn test_bool_values() {
         let dir = tempdir().unwrap();
-        let env_path = dir.path().join(".env");
+        let json_path = dir.path().join("settings.json");
 
-        let mut file = File::create(&env_path).unwrap();
-        writeln!(file, "BOOL_TRUE=true").unwrap();
-        writeln!(file, "BOOL_YES=yes").unwrap();
-        writeln!(file, "BOOL_ONE=1").unwrap();
-        writeln!(file, "BOOL_ON=on").unwrap();
-        writeln!(file, "BOOL_FALSE=false").unwrap();
-        writeln!(file, "BOOL_NO=no").unwrap();
-        writeln!(file, "BOOL_ZERO=0").unwrap();
-        writeln!(file, "BOOL_EMPTY=").unwrap();
+        let json_content = r#"{
+            "hippocampus": {
+                "reprocess_on_change": true,
+                "delete_after_processing": false
+            }
+        }"#;
+
+        let mut file = File::create(&json_path).unwrap();
+        write!(file, "{}", json_content).unwrap();
         drop(file);
 
-        let config = Config::new(Some(env_path), false).unwrap();
+        let config = Config::new(Some(json_path), false).unwrap();
 
-        assert!(config.get_bool("BOOL_TRUE", false));
-        assert!(config.get_bool("BOOL_YES", false));
-        assert!(config.get_bool("BOOL_ONE", false));
-        assert!(config.get_bool("BOOL_ON", false));
-        assert!(!config.get_bool("BOOL_FALSE", true));
-        assert!(!config.get_bool("BOOL_NO", true));
-        assert!(!config.get_bool("BOOL_ZERO", true));
-        assert!(!config.get_bool("BOOL_EMPTY", true));
+        assert!(config.get_bool("REPROCESS_ON_CHANGE", false));
+        assert!(!config.get_bool("DELETE_AFTER_PROCESSING", true));
     }
 
     #[test]
     fn test_path_expansion() {
         let dir = tempdir().unwrap();
-        let env_path = dir.path().join(".env");
+        let json_path = dir.path().join("settings.json");
 
-        let mut file = File::create(&env_path).unwrap();
-        writeln!(file, "HOME_PATH=~/Documents").unwrap();
-        writeln!(file, "ABS_PATH=/tmp/test").unwrap();
+        let json_content = r#"{
+            "hippocampus": {
+                "input_dir": "~/Documents/AI_IN"
+            }
+        }"#;
+
+        let mut file = File::create(&json_path).unwrap();
+        write!(file, "{}", json_content).unwrap();
         drop(file);
 
-        let config = Config::new(Some(env_path), false).unwrap();
+        let config = Config::new(Some(json_path), false).unwrap();
 
-        let home_path = config.get_path("HOME_PATH", None).unwrap();
-        assert!(!home_path.to_string_lossy().contains('~'));
-        assert!(home_path.to_string_lossy().contains("Documents"));
+        let input_path = config.get_path("INPUT_DIR", None).unwrap();
+        assert!(!input_path.to_string_lossy().contains('~'));
+        assert!(input_path.to_string_lossy().contains("Documents/AI_IN"));
+    }
 
-        let abs_path = config.get_path("ABS_PATH", None).unwrap();
-        assert_eq!(abs_path, PathBuf::from("/tmp/test"));
+    #[test]
+    fn test_json_preferred_over_env() {
+        let dir = tempdir().unwrap();
+        let json_path = dir.path().join("settings.json");
+        let env_path = dir.path().join(".env");
+
+        // Create both files with different values
+        let mut json_file = File::create(&json_path).unwrap();
+        write!(json_file, r#"{{"global": {{"log_level": "DEBUG"}}}}"#).unwrap();
+        drop(json_file);
+
+        let mut env_file = File::create(&env_path).unwrap();
+        writeln!(env_file, "LOG_LEVEL=WARNING").unwrap();
+        drop(env_file);
+
+        // Config should prefer JSON
+        let config = Config::new(Some(dir.path().to_path_buf()), false).unwrap();
+        assert_eq!(config.get("LOG_LEVEL", None), Some("DEBUG".to_string()));
+        assert!(config.using_json);
     }
 }

@@ -2,27 +2,88 @@
 Unified Configuration Library for Olorin Project
 
 Provides a Config class with type-safe getters and optional hot-reload support.
+Reads from settings.json (preferred) or falls back to .env for backward compatibility.
 """
 
+import json
 import os
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
+
+
+# Mapping from flat keys to JSON paths for backward compatibility
+_KEY_TO_PATH = {
+    # Global
+    'LOG_LEVEL': 'global.log_level',
+    'LOG_DIR': 'global.log_dir',
+    # Kafka
+    'KAFKA_BOOTSTRAP_SERVERS': 'kafka.bootstrap_servers',
+    'KAFKA_SEND_TIMEOUT': 'kafka.send_timeout',
+    'KAFKA_MAX_RETRIES': 'kafka.max_retries',
+    # Exo
+    'EXO_BASE_URL': 'exo.base_url',
+    'EXO_API_KEY': 'exo.api_key',
+    'MODEL_NAME': 'exo.model_name',
+    'TEMPERATURE': 'exo.temperature',
+    'MAX_TOKENS': 'exo.max_tokens',
+    # Broca
+    'BROCA_KAFKA_TOPIC': 'broca.kafka_topic',
+    'BROCA_CONSUMER_GROUP': 'broca.consumer_group',
+    'BROCA_AUTO_OFFSET_RESET': 'broca.auto_offset_reset',
+    'TTS_MODEL_NAME': 'broca.tts.model_name',
+    'TTS_SPEAKER': 'broca.tts.speaker',
+    'TTS_OUTPUT_DIR': 'broca.tts.output_dir',
+    # Cortex
+    'CORTEX_INPUT_TOPIC': 'cortex.input_topic',
+    'CORTEX_OUTPUT_TOPIC': 'cortex.output_topic',
+    'CORTEX_CONSUMER_GROUP': 'cortex.consumer_group',
+    'CORTEX_AUTO_OFFSET_RESET': 'cortex.auto_offset_reset',
+    # Hippocampus
+    'INPUT_DIR': 'hippocampus.input_dir',
+    'CHROMADB_HOST': 'hippocampus.chromadb.host',
+    'CHROMADB_PORT': 'hippocampus.chromadb.port',
+    'CHROMADB_COLLECTION': 'hippocampus.chromadb.collection',
+    'EMBEDDING_MODEL': 'hippocampus.embedding_model',
+    'CHUNK_SIZE': 'hippocampus.chunking.size',
+    'CHUNK_OVERLAP': 'hippocampus.chunking.overlap',
+    'CHUNK_MIN_SIZE': 'hippocampus.chunking.min_size',
+    'POLL_INTERVAL': 'hippocampus.poll_interval',
+    'TRACKING_DB': 'hippocampus.tracking_db',
+    'REPROCESS_ON_CHANGE': 'hippocampus.reprocess_on_change',
+    'DELETE_AFTER_PROCESSING': 'hippocampus.delete_after_processing',
+    'LOG_FILE': 'hippocampus.log_file',
+    # Enrichener
+    'ENRICHENER_INPUT_TOPIC': 'enrichener.input_topic',
+    'ENRICHENER_OUTPUT_TOPIC': 'enrichener.output_topic',
+    'ENRICHENER_CONSUMER_GROUP': 'enrichener.consumer_group',
+    'ENRICHENER_AUTO_OFFSET_RESET': 'enrichener.auto_offset_reset',
+    'ENRICHENER_THREAD_POOL_SIZE': 'enrichener.thread_pool_size',
+    'LLM_TIMEOUT_SECONDS': 'enrichener.llm_timeout_seconds',
+    'DECISION_TEMPERATURE': 'enrichener.decision_temperature',
+    'CHROMADB_QUERY_N_RESULTS': 'enrichener.chromadb_query_n_results',
+    'CONTEXT_DB_PATH': 'enrichener.context_db_path',
+    'CLEANUP_CONTEXT_AFTER_USE': 'enrichener.cleanup_context_after_use',
+    # Chat
+    'CHAT_HISTORY_ENABLED': 'chat.history_enabled',
+    'CHAT_DB_PATH': 'chat.db_path',
+    'CHAT_RESET_PATTERNS': 'chat.reset_patterns',
+}
 
 
 def _find_project_root() -> Path:
-    """Find the project root by looking for the .env file or known directories."""
+    """Find the project root by looking for settings.json or .env file."""
     current = Path(__file__).resolve().parent
 
     # Go up from libs/ to project root
     if current.name == 'libs':
         project_root = current.parent
-        if (project_root / '.env').exists():
+        if (project_root / 'settings.json').exists() or (project_root / '.env').exists():
             return project_root
 
-    # Fallback: search upward for .env
+    # Fallback: search upward for settings.json or .env
     search = current
     for _ in range(5):  # Limit search depth
-        if (search / '.env').exists():
+        if (search / 'settings.json').exists() or (search / '.env').exists():
             return search
         if search.parent == search:
             break
@@ -34,10 +95,10 @@ def _find_project_root() -> Path:
 
 class Config:
     """
-    Configuration manager that loads from a .env file.
+    Configuration manager that loads from settings.json or .env file.
 
     Provides type-safe getters and optional hot-reload support for runtime
-    configuration changes.
+    configuration changes. Prefers settings.json if available, falls back to .env.
 
     Usage:
         config = Config()
@@ -45,6 +106,7 @@ class Config:
         port = config.get_int('CHROMADB_PORT', 8000)
         enabled = config.get_bool('FEATURE_ENABLED', False)
         path = config.get_path('INPUT_DIR', '~/Documents')
+        patterns = config.get_list('CHAT_RESET_PATTERNS', [])
 
         # With hot-reload support
         config = Config(watch=True)
@@ -52,64 +114,118 @@ class Config:
             print("Configuration was updated")
     """
 
-    def __init__(self, env_path: Optional[Union[str, Path]] = None, watch: bool = False):
+    def __init__(self, config_path: Optional[Union[str, Path]] = None, watch: bool = False):
         """
         Initialize the configuration manager.
 
         Args:
-            env_path: Path to the .env file. Defaults to project root .env
+            config_path: Path to settings.json or .env file. Defaults to project root.
             watch: If True, enables hot-reload support via reload() method
         """
-        if env_path is None:
-            self._env_path = _find_project_root() / '.env'
+        project_root = _find_project_root()
+
+        if config_path is None:
+            self._json_path = project_root / 'settings.json'
+            self._env_path = project_root / '.env'
         else:
-            self._env_path = Path(env_path).resolve()
+            path = Path(config_path).resolve()
+            if path.suffix == '.json':
+                self._json_path = path
+                self._env_path = path.parent / '.env'
+            elif path.suffix == '.env' or path.name == '.env':
+                self._json_path = path.parent / 'settings.json'
+                self._env_path = path
+            else:
+                # Assume it's a directory
+                self._json_path = path / 'settings.json'
+                self._env_path = path / '.env'
 
         self._watch = watch
         self._mtime: Optional[float] = None
-        self._overrides: dict[str, str] = {}
+        self._overrides: dict[str, Any] = {}
+        self._data: dict = {}
+        self._using_json = False
 
         self._load()
 
     def _load(self) -> None:
-        """Load the .env file into environment variables."""
-        if not self._env_path.exists():
+        """Load configuration from settings.json or fall back to .env."""
+        # Prefer settings.json
+        if self._json_path.exists():
+            self._mtime = self._json_path.stat().st_mtime
+            with open(self._json_path, 'r') as f:
+                self._data = json.load(f)
+            self._using_json = True
             return
 
-        self._mtime = self._env_path.stat().st_mtime
+        # Fall back to .env
+        if self._env_path.exists():
+            self._mtime = self._env_path.stat().st_mtime
+            self._data = self._parse_env_to_nested()
+            self._using_json = False
+
+    def _parse_env_to_nested(self) -> dict:
+        """Parse .env file into nested dictionary structure."""
+        flat_data = {}
 
         with open(self._env_path, 'r') as f:
             for line in f:
                 line = line.strip()
-
-                # Skip empty lines and comments
                 if not line or line.startswith('#'):
                     continue
-
-                # Parse KEY=value format
                 if '=' in line:
                     key, _, value = line.partition('=')
                     key = key.strip()
                     value = value.strip()
-
-                    # Remove surrounding quotes if present
                     if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                         value = value[1:-1]
+                    flat_data[key] = value
 
-                    os.environ[key] = value
+        # Convert flat keys to nested structure
+        result: dict = {}
+        for flat_key, value in flat_data.items():
+            if flat_key in _KEY_TO_PATH:
+                self._set_nested(result, _KEY_TO_PATH[flat_key], value)
+            else:
+                # Store unknown keys at root level
+                result[flat_key] = value
+
+        return result
+
+    def _set_nested(self, d: dict, path: str, value: Any) -> None:
+        """Set a value in a nested dictionary using dot notation path."""
+        keys = path.split('.')
+        for key in keys[:-1]:
+            d = d.setdefault(key, {})
+        d[keys[-1]] = value
+
+    def _get_nested(self, path: str) -> Any:
+        """Get a value from nested dictionary using dot notation path."""
+        keys = path.split('.')
+        value = self._data
+        for key in keys:
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            else:
+                return None
+        return value
 
     def reload(self) -> bool:
         """
-        Reload configuration if the .env file has changed.
+        Reload configuration if the config file has changed.
 
         Returns:
             True if configuration was reloaded, False otherwise
         """
-        if not self._watch or not self._env_path.exists():
+        if not self._watch:
             return False
 
-        current_mtime = self._env_path.stat().st_mtime
+        # Check the appropriate config file
+        config_path = self._json_path if self._json_path.exists() else self._env_path
+        if not config_path.exists():
+            return False
 
+        current_mtime = config_path.stat().st_mtime
         if current_mtime != self._mtime:
             self._load()
             return True
@@ -121,7 +237,7 @@ class Config:
         Get a configuration value as a string.
 
         Args:
-            key: The environment variable name
+            key: The configuration key (flat like 'CHROMADB_PORT' or nested like 'hippocampus.chromadb.port')
             default: Default value if not set
 
         Returns:
@@ -129,27 +245,56 @@ class Config:
         """
         # Check overrides first
         if key in self._overrides:
-            return self._overrides[key]
+            val = self._overrides[key]
+            if val is None:
+                return default
+            if isinstance(val, list):
+                return ','.join(str(v) for v in val)
+            return str(val)
 
-        return os.environ.get(key, default)
+        # Map flat key to nested path if known
+        path = _KEY_TO_PATH.get(key, key)
+        value = self._get_nested(path)
+
+        if value is None:
+            return default
+
+        # Handle arrays - convert to comma-separated string for backward compat
+        if isinstance(value, list):
+            return ','.join(str(v) for v in value)
+
+        return str(value)
 
     def get_int(self, key: str, default: Optional[int] = None) -> Optional[int]:
         """
         Get a configuration value as an integer.
 
         Args:
-            key: The environment variable name
+            key: The configuration key
             default: Default value if not set or invalid
 
         Returns:
             The configuration value as int or default
         """
-        value = self.get(key)
-        if value is None:
+        # Check overrides first for native int
+        if key in self._overrides:
+            val = self._overrides[key]
+            if isinstance(val, int):
+                return val
+
+        # Try nested path for native JSON int
+        path = _KEY_TO_PATH.get(key, key)
+        value = self._get_nested(path)
+        if isinstance(value, int):
+            return value
+
+        # Fall back to string parsing
+        str_value = self.get(key)
+        if str_value is None:
             return default
 
         try:
-            return int(value)
+            return int(str_value)
         except (ValueError, TypeError):
             return default
 
@@ -158,18 +303,31 @@ class Config:
         Get a configuration value as a float.
 
         Args:
-            key: The environment variable name
+            key: The configuration key
             default: Default value if not set or invalid
 
         Returns:
             The configuration value as float or default
         """
-        value = self.get(key)
-        if value is None:
+        # Check overrides first for native float
+        if key in self._overrides:
+            val = self._overrides[key]
+            if isinstance(val, (int, float)):
+                return float(val)
+
+        # Try nested path for native JSON number
+        path = _KEY_TO_PATH.get(key, key)
+        value = self._get_nested(path)
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        # Fall back to string parsing
+        str_value = self.get(key)
+        if str_value is None:
             return default
 
         try:
-            return float(value)
+            return float(str_value)
         except (ValueError, TypeError):
             return default
 
@@ -177,21 +335,37 @@ class Config:
         """
         Get a configuration value as a boolean.
 
-        Recognizes: true, yes, 1, on (case-insensitive) as True
-        Everything else (including empty string) is False
+        Recognizes: true, yes, 1, on (case-insensitive) as True.
+        Native JSON booleans are handled directly.
+        Everything else (including empty string) is False.
 
         Args:
-            key: The environment variable name
+            key: The configuration key
             default: Default value if not set
 
         Returns:
             The configuration value as bool or default
         """
-        value = self.get(key)
+        # Check overrides first
+        if key in self._overrides:
+            val = self._overrides[key]
+            if isinstance(val, bool):
+                return val
+            if val is None:
+                return default
+            return str(val).lower() in ('true', 'yes', '1', 'on')
+
+        # Try nested path for native JSON bool
+        path = _KEY_TO_PATH.get(key, key)
+        value = self._get_nested(path)
+
         if value is None:
             return default
 
-        return value.lower() in ('true', 'yes', '1', 'on')
+        if isinstance(value, bool):
+            return value
+
+        return str(value).lower() in ('true', 'yes', '1', 'on')
 
     def get_path(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """
@@ -200,7 +374,7 @@ class Config:
         Expands ~ to the user's home directory.
 
         Args:
-            key: The environment variable name
+            key: The configuration key
             default: Default value if not set
 
         Returns:
@@ -212,27 +386,63 @@ class Config:
 
         return os.path.expanduser(value)
 
+    def get_list(self, key: str, default: Optional[List[str]] = None) -> Optional[List[str]]:
+        """
+        Get a configuration value as a list of strings.
+
+        Native JSON arrays are returned directly.
+        Comma-separated strings are split into lists.
+
+        Args:
+            key: The configuration key
+            default: Default value if not set
+
+        Returns:
+            The configuration value as list or default
+        """
+        # Check overrides first
+        if key in self._overrides:
+            val = self._overrides[key]
+            if isinstance(val, list):
+                return [str(v) for v in val]
+            if val is None:
+                return default
+            return [v.strip() for v in str(val).split(',')]
+
+        # Try nested path for native JSON array
+        path = _KEY_TO_PATH.get(key, key)
+        value = self._get_nested(path)
+
+        if value is None:
+            return default
+
+        if isinstance(value, list):
+            return [str(v) for v in value]
+
+        # Parse comma-separated string
+        return [v.strip() for v in str(value).split(',')]
+
     def set(self, key: str, value: Any) -> None:
         """
         Set a configuration value (in-memory only).
 
-        This override takes precedence over environment variables.
-        Does not modify the .env file.
+        This override takes precedence over file values.
+        Does not modify the config file.
 
         Args:
-            key: The environment variable name
+            key: The configuration key
             value: The value to set
         """
-        self._overrides[key] = str(value)
+        self._overrides[key] = value
 
     def clear_override(self, key: str) -> None:
         """
         Clear an in-memory override for a key.
 
-        After clearing, get() will return the environment variable value.
+        After clearing, get() will return the file value.
 
         Args:
-            key: The environment variable name
+            key: The configuration key
         """
         self._overrides.pop(key, None)
 
@@ -241,9 +451,14 @@ class Config:
         self._overrides.clear()
 
     @property
+    def config_path(self) -> Path:
+        """Return the path to the active config file."""
+        return self._json_path if self._using_json else self._env_path
+
+    @property
     def env_path(self) -> Path:
-        """Return the path to the .env file."""
-        return self._env_path
+        """Return the path to the config file (deprecated, use config_path)."""
+        return self.config_path
 
 
 # Convenience singleton for simple usage

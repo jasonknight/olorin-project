@@ -1,0 +1,75 @@
+{
+  "global": {
+    "log_level": "INFO"
+  },
+  "kafka": {
+    "bootstrap_servers": "localhost:9092",
+    "send_timeout": 10,
+    "max_retries": 3
+  },
+  "exo": {
+    "base_url": "http://localhost:52415/v1",
+    "api_key": "dummy-key",
+    "model_name": null,
+    "temperature": 0.7,
+    "max_tokens": null
+  },
+  "broca": {
+    "kafka_topic": "ai_out",
+    "consumer_group": "tts-consumer-group",
+    "auto_offset_reset": "earliest",
+    "tts": {
+      "model_name": "tts_models/en/vctk/vits",
+      "speaker": "p272",
+      "output_dir": "output"
+    }
+  },
+  "cortex": {
+    "input_topic": "prompts",
+    "output_topic": "ai_out",
+    "consumer_group": "exo-consumer-group",
+    "auto_offset_reset": "earliest"
+  },
+  "hippocampus": {
+    "input_dir": "~/Documents/AI_IN",
+    "chromadb": {
+      "host": "localhost",
+      "port": 8000,
+      "collection": "documents"
+    },
+    "embedding_model": "all-MiniLM-L6-v2",
+    "chunking": {
+      "size": 1000,
+      "overlap": 200,
+      "min_size": 100
+    },
+    "poll_interval": 5,
+    "tracking_db": "./data/tracking.db",
+    "reprocess_on_change": true,
+    "delete_after_processing": false,
+    "log_file": "./data/ingest.log"
+  },
+  "enrichener": {
+    "input_topic": "ai_in",
+    "output_topic": "prompts",
+    "consumer_group": "enrichener-consumer-group",
+    "auto_offset_reset": "earliest",
+    "thread_pool_size": 3,
+    "llm_timeout_seconds": 120,
+    "decision_temperature": 0.1,
+    "chromadb_query_n_results": 10,
+    "context_db_path": "./data/context.db",
+    "cleanup_context_after_use": true
+  },
+  "chat": {
+    "history_enabled": true,
+    "db_path": "./cortex/data/chat.db",
+    "reset_patterns": [
+      "/reset",
+      "reset conversation",
+      "new conversation",
+      "start over",
+      "clear history"
+    ]
+  }
+}
