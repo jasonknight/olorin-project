@@ -1,5 +1,7 @@
 //! Message types for the chat display
 
+#![allow(dead_code)]
+
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 
 /// A chat message from the database
@@ -78,7 +80,10 @@ impl ChatMessage {
         if let Some(ref metadata) = self.metadata {
             // Try to parse the JSON metadata
             if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata) {
-                let chunk_count = meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let chunk_count = meta
+                    .get("chunk_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let sources = meta.get("sources").and_then(|v| v.as_array());
                 let distances = meta.get("distances").and_then(|v| v.as_array());
 
@@ -113,7 +118,10 @@ impl ChatMessage {
                     String::new()
                 };
 
-                return format!("{} chunk(s) retrieved{}{}", chunk_count, source_info, relevance_info);
+                return format!(
+                    "{} chunk(s) retrieved{}{}",
+                    chunk_count, source_info, relevance_info
+                );
             }
         }
         // Fallback if metadata parsing fails

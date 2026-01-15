@@ -61,6 +61,7 @@ impl KafkaProducer {
 }
 
 /// Create a producer with default settings from config
+#[allow(dead_code)]
 pub fn create_producer(bootstrap_servers: &str) -> Result<KafkaProducer> {
     KafkaProducer::new(bootstrap_servers, "ai_in")
 }

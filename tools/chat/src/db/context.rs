@@ -1,5 +1,7 @@
 //! Context database monitoring
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use chrono::Local;
 use rusqlite::Connection;
@@ -102,7 +104,8 @@ impl ContextDb {
 
         // Update last seen timestamp
         if !contexts.is_empty() {
-            self.last_seen_timestamp = Some(Local::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string());
+            self.last_seen_timestamp =
+                Some(Local::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string());
         }
 
         Ok(contexts)
@@ -121,7 +124,11 @@ impl ContextDb {
             .unwrap_or(0);
 
         let unique_prompts: i64 = conn
-            .query_row("SELECT COUNT(DISTINCT prompt_id) FROM contexts", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(DISTINCT prompt_id) FROM contexts",
+                [],
+                |row| row.get(0),
+            )
             .unwrap_or(0);
 
         Ok(ContextStats {

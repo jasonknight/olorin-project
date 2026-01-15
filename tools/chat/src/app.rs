@@ -45,10 +45,7 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    pub fn new(
-        chat_db_path: PathBuf,
-        bootstrap_servers: &str,
-    ) -> Result<Self> {
+    pub fn new(chat_db_path: PathBuf, bootstrap_servers: &str) -> Result<Self> {
         // Create channel for background events
         let (tx, rx) = mpsc::channel();
 
@@ -106,16 +103,20 @@ impl<'a> App<'a> {
                 match chat_db.get_new_and_updated_messages() {
                     Ok(result) => {
                         // Send new messages
-                        if !result.new_messages.is_empty() {
-                            if tx.send(AppEvent::NewChatMessages(result.new_messages)).is_err() {
-                                break; // Channel closed, exit thread
-                            }
+                        if !result.new_messages.is_empty()
+                            && tx
+                                .send(AppEvent::NewChatMessages(result.new_messages))
+                                .is_err()
+                        {
+                            break; // Channel closed, exit thread
                         }
                         // Send updated messages (streaming updates)
-                        if !result.updated_messages.is_empty() {
-                            if tx.send(AppEvent::UpdatedChatMessages(result.updated_messages)).is_err() {
-                                break;
-                            }
+                        if !result.updated_messages.is_empty()
+                            && tx
+                                .send(AppEvent::UpdatedChatMessages(result.updated_messages))
+                                .is_err()
+                        {
+                            break;
                         }
                     }
                     Err(e) => {
@@ -146,7 +147,7 @@ impl<'a> App<'a> {
                     for updated_msg in updated_messages {
                         // Find the existing message by ID and replace it
                         for existing in &mut self.messages {
-                            if let DisplayMessage::Chat(ref mut chat_msg) = existing {
+                            if let DisplayMessage::Chat(chat_msg) = existing {
                                 if chat_msg.id == updated_msg.id {
                                     // Update the content and updated_at timestamp
                                     chat_msg.content = updated_msg.content.clone();
@@ -185,10 +186,10 @@ impl<'a> App<'a> {
                     self.status = String::from("Sent!");
                     // Clear the input
                     self.input = TextArea::default();
-                    self.input.set_cursor_line_style(ratatui::style::Style::default());
-                    self.input.set_placeholder_text(
-                        "Type your message... (Enter to send, Esc to quit)",
-                    );
+                    self.input
+                        .set_cursor_line_style(ratatui::style::Style::default());
+                    self.input
+                        .set_placeholder_text("Type your message... (Enter to send, Esc to quit)");
                 }
                 Err(e) => {
                     self.status = format!("Send failed: {}", e);

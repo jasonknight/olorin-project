@@ -1,7 +1,7 @@
 //! Layout management for the TUI
 
-use ratatui::prelude::*;
 use ratatui::Frame;
+use ratatui::prelude::*;
 
 /// Create the main three-panel layout
 ///
@@ -21,8 +21,8 @@ pub fn create_layout(frame: &Frame) -> (Rect, Rect, Rect) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),    // Main content area
-            Constraint::Length(6),  // Input area (4 lines + 2 for border)
+            Constraint::Min(10),   // Main content area
+            Constraint::Length(6), // Input area (4 lines + 2 for border)
         ])
         .split(main_area);
 

@@ -42,9 +42,20 @@ Hippocampus (Knowledge Base)
 
 ### Linting and Formatting Code
 
-```
-# Run this command when you've written new code
+```bash
+# Run this command when you've written new Python code
 pre-commit run --all-files
+
+# Run these commands when you've written new Rust code
+# Format all Rust projects (uses edition from each Cargo.toml)
+cargo fmt --manifest-path libs/config-rs/Cargo.toml
+cargo fmt --manifest-path tools/chat/Cargo.toml
+cargo fmt --manifest-path tools/olorin-inspector/Cargo.toml
+
+# Run clippy on all Rust projects and fix any issues found
+cargo clippy --manifest-path libs/config-rs/Cargo.toml -- -D warnings
+cargo clippy --manifest-path tools/chat/Cargo.toml -- -D warnings
+cargo clippy --manifest-path tools/olorin-inspector/Cargo.toml -- -D warnings
 ``` 
 
 ### Starting/Stopping the System

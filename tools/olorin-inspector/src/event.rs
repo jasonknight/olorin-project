@@ -1,5 +1,7 @@
 //! Event handling for olorin-inspector
 
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};

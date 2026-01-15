@@ -52,8 +52,8 @@ fn render_status_bar(frame: &mut Frame, app: &App) {
         .as_deref()
         .unwrap_or("Ready | Tab: switch panels | Esc: quit");
 
-    let status = Paragraph::new(status_text)
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    let status =
+        Paragraph::new(status_text).style(Style::default().fg(Color::White).bg(Color::DarkGray));
 
     frame.render_widget(status, status_area);
 }

@@ -1,5 +1,7 @@
 //! Core traits and types for database abstraction
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 /// Connection state for databases that require network connectivity

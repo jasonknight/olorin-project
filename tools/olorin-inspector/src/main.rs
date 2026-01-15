@@ -30,12 +30,12 @@ use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
 
 use app::App;
-use event::{handle_event, EventHandler};
+use event::{EventHandler, handle_event};
 
 /// Tick rate for the event loop (milliseconds)
 const TICK_RATE_MS: u64 = 250;

@@ -1,8 +1,8 @@
 //! Database list panel component
 
+use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
-use ratatui::Frame;
 
 use crate::app::{App, FocusedPanel};
 use crate::db::{ConnectionState, DatabaseType};

@@ -1,5 +1,7 @@
 //! SQLite database implementations
 
+#![allow(clippy::needless_range_loop)]
+
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
@@ -66,15 +68,26 @@ impl SqliteFileTracker {
 
         let mut record = Record::new();
         record.fields.insert("file_path".to_string(), file_path);
-        record.fields.insert("content_hash".to_string(), content_hash);
-        record.fields.insert("file_size".to_string(), file_size.to_string());
-        record.fields.insert("processed_at".to_string(), processed_at.clone());
-        record.fields.insert("chunk_count".to_string(), chunk_count.to_string());
-        record.fields.insert("status".to_string(), status);
-        record.fields.insert("retries".to_string(), retries.to_string());
         record
             .fields
-            .insert("error_message".to_string(), error_message.unwrap_or_default());
+            .insert("content_hash".to_string(), content_hash);
+        record
+            .fields
+            .insert("file_size".to_string(), file_size.to_string());
+        record
+            .fields
+            .insert("processed_at".to_string(), processed_at.clone());
+        record
+            .fields
+            .insert("chunk_count".to_string(), chunk_count.to_string());
+        record.fields.insert("status".to_string(), status);
+        record
+            .fields
+            .insert("retries".to_string(), retries.to_string());
+        record.fields.insert(
+            "error_message".to_string(),
+            error_message.unwrap_or_default(),
+        );
         record.timestamp = Some(processed_at);
 
         Ok(record)
@@ -139,7 +152,10 @@ impl DatabaseSource for SqliteFileTracker {
     }
 
     fn execute_query(&self, query: &str) -> Result<Vec<Record>, DbError> {
-        let mut stmt = self.conn.prepare(query).map_err(|e| DbError::Query(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(query)
+            .map_err(|e| DbError::Query(e.to_string()))?;
 
         let column_count = stmt.column_count();
         let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -289,7 +305,9 @@ impl SqliteContext {
             "distance".to_string(),
             distance.map(|f| format!("{:.4}", f)).unwrap_or_default(),
         );
-        record.fields.insert("added_at".to_string(), added_at.clone());
+        record
+            .fields
+            .insert("added_at".to_string(), added_at.clone());
         record.timestamp = Some(added_at);
 
         Ok(record)
@@ -354,7 +372,10 @@ impl DatabaseSource for SqliteContext {
 
     fn execute_query(&self, query: &str) -> Result<Vec<Record>, DbError> {
         // Reuse the generic query execution from SqliteFileTracker
-        let mut stmt = self.conn.prepare(query).map_err(|e| DbError::Query(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(query)
+            .map_err(|e| DbError::Query(e.to_string()))?;
 
         let column_count = stmt.column_count();
         let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -548,7 +569,10 @@ impl DatabaseSource for SqliteChat {
     }
 
     fn execute_query(&self, query: &str) -> Result<Vec<Record>, DbError> {
-        let mut stmt = self.conn.prepare(query).map_err(|e| DbError::Query(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(query)
+            .map_err(|e| DbError::Query(e.to_string()))?;
 
         let column_count = stmt.column_count();
         let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();

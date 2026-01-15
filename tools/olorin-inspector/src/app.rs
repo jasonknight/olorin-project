@@ -154,11 +154,31 @@ impl App {
     fn load_databases(&mut self) {
         // SQLite file trackers - load paths from config
         let sqlite_trackers = [
-            ("Markdown Tracker", "TRACKING_DB", "./hippocampus/data/tracking.db"),
-            ("PDF Tracker", "PDF_TRACKING_DB", "./hippocampus/data/pdf_tracking.db"),
-            ("Ebook Tracker", "EBOOK_TRACKING_DB", "./hippocampus/data/ebook_tracking.db"),
-            ("TXT Tracker", "TXT_TRACKING_DB", "./hippocampus/data/txt_tracking.db"),
-            ("Office Tracker", "OFFICE_TRACKING_DB", "./hippocampus/data/office_tracking.db"),
+            (
+                "Markdown Tracker",
+                "TRACKING_DB",
+                "./hippocampus/data/tracking.db",
+            ),
+            (
+                "PDF Tracker",
+                "PDF_TRACKING_DB",
+                "./hippocampus/data/pdf_tracking.db",
+            ),
+            (
+                "Ebook Tracker",
+                "EBOOK_TRACKING_DB",
+                "./hippocampus/data/ebook_tracking.db",
+            ),
+            (
+                "TXT Tracker",
+                "TXT_TRACKING_DB",
+                "./hippocampus/data/txt_tracking.db",
+            ),
+            (
+                "Office Tracker",
+                "OFFICE_TRACKING_DB",
+                "./hippocampus/data/office_tracking.db",
+            ),
         ];
 
         for (name, config_key, default_path) in sqlite_trackers {
@@ -176,7 +196,10 @@ impl App {
         }
 
         // Context store
-        if let Some(context_path) = self.config.get_path("HIPPOCAMPUS_CONTEXT_DB", Some("./hippocampus/data/context.db")) {
+        if let Some(context_path) = self.config.get_path(
+            "HIPPOCAMPUS_CONTEXT_DB",
+            Some("./hippocampus/data/context.db"),
+        ) {
             match SqliteContext::new("Context Store", &context_path) {
                 Ok(db) => self.databases.push(Box::new(db)),
                 Err(DbError::NotFound(_)) => {}
@@ -187,7 +210,10 @@ impl App {
         }
 
         // Chat history
-        if let Some(chat_path) = self.config.get_path("CHAT_DB_PATH", Some("./cortex/data/chat.db")) {
+        if let Some(chat_path) = self
+            .config
+            .get_path("CHAT_DB_PATH", Some("./cortex/data/chat.db"))
+        {
             match SqliteChat::new("Chat History", &chat_path) {
                 Ok(db) => self.databases.push(Box::new(db)),
                 Err(DbError::NotFound(_)) => {}
@@ -202,7 +228,10 @@ impl App {
             .config
             .get("CHROMADB_HOST", Some("localhost"))
             .unwrap_or_else(|| "localhost".to_string());
-        let chromadb_port = self.config.get_int("CHROMADB_PORT", Some(8000)).unwrap_or(8000) as u16;
+        let chromadb_port = self
+            .config
+            .get_int("CHROMADB_PORT", Some(8000))
+            .unwrap_or(8000) as u16;
         let collection = self
             .config
             .get("CHROMADB_COLLECTION", Some("documents"))
@@ -418,7 +447,9 @@ impl App {
 
     /// Show the clear database confirmation modal
     pub fn show_clear_modal(&mut self) {
-        self.clear_modal = Some(ClearDbModal { yes_selected: false });
+        self.clear_modal = Some(ClearDbModal {
+            yes_selected: false,
+        });
     }
 
     /// Hide the clear database confirmation modal
@@ -446,10 +477,8 @@ impl App {
             let db_name = db.info().name.clone();
             match db.clear_database() {
                 Ok(deleted) => {
-                    self.status_message = Some(format!(
-                        "Cleared {} - deleted {} records",
-                        db_name, deleted
-                    ));
+                    self.status_message =
+                        Some(format!("Cleared {} - deleted {} records", db_name, deleted));
                     self.records.clear();
                     self.record_scroll = 0;
                     // Refresh count
@@ -485,15 +514,9 @@ impl App {
 
                 // Notify on state change
                 if was_connected && !is_connected {
-                    self.status_message = Some(format!(
-                        "{} went offline",
-                        db.info().name
-                    ));
+                    self.status_message = Some(format!("{} went offline", db.info().name));
                 } else if !was_connected && is_connected {
-                    self.status_message = Some(format!(
-                        "{} reconnected",
-                        db.info().name
-                    ));
+                    self.status_message = Some(format!("{} reconnected", db.info().name));
                 }
             }
         }
@@ -506,9 +529,10 @@ impl App {
             Some(c) => c,
             None => {
                 // Check if we already have ChromaDB in the list and it's disconnected
-                let chromadb_idx = self.databases.iter().position(|db| {
-                    db.info().db_type == DatabaseType::ChromaDB
-                });
+                let chromadb_idx = self
+                    .databases
+                    .iter()
+                    .position(|db| db.info().db_type == DatabaseType::ChromaDB);
 
                 if let Some(idx) = chromadb_idx {
                     // Health check the existing ChromaDB

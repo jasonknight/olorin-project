@@ -179,9 +179,10 @@ impl DatabaseSource for ChromaDbSource {
     fn health_check(&mut self) -> bool {
         // Use the v2 heartbeat endpoint to check if ChromaDB is running
         // Extract host:port from base_url and use /api/v2/heartbeat
-        let heartbeat_url = self
-            .base_url
-            .replace("/tenants/default_tenant/databases/default_database", "/heartbeat");
+        let heartbeat_url = self.base_url.replace(
+            "/tenants/default_tenant/databases/default_database",
+            "/heartbeat",
+        );
 
         match self.client.get(&heartbeat_url).send() {
             Ok(response) if response.status().is_success() => {
@@ -280,10 +281,7 @@ impl DatabaseSource for ChromaDbSource {
     }
 
     fn refresh_count(&mut self) -> Result<usize, DbError> {
-        let count_url = format!(
-            "{}/collections/{}/count",
-            self.base_url, self.collection_id
-        );
+        let count_url = format!("{}/collections/{}/count", self.base_url, self.collection_id);
         let count: usize = self.client.get(&count_url).send()?.json()?;
         self.info.record_count = count;
         Ok(count)
@@ -318,10 +316,11 @@ impl DatabaseSource for ChromaDbSource {
         }
 
         // Delete all IDs
-        let delete_url = format!("{}/collections/{}/delete", self.base_url, self.collection_id);
-        let delete_request = ChromaDeleteRequest {
-            ids: response.ids,
-        };
+        let delete_url = format!(
+            "{}/collections/{}/delete",
+            self.base_url, self.collection_id
+        );
+        let delete_request = ChromaDeleteRequest { ids: response.ids };
 
         self.client
             .post(&delete_url)

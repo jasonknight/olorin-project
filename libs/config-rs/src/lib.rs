@@ -180,10 +180,16 @@ impl Config {
         let (project_root, json_path, env_path) = match config_path {
             Some(p) => {
                 if p.extension().is_some_and(|e| e == "json") {
-                    let parent = p.parent().map(PathBuf::from).unwrap_or_else(|| root.clone());
+                    let parent = p
+                        .parent()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| root.clone());
                     (parent.clone(), p.clone(), parent.join(".env"))
                 } else if p.file_name().is_some_and(|n| n == ".env") {
-                    let parent = p.parent().map(PathBuf::from).unwrap_or_else(|| root.clone());
+                    let parent = p
+                        .parent()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| root.clone());
                     (parent.clone(), parent.join("settings.json"), p)
                 } else {
                     // Assume it's a directory
@@ -340,10 +346,8 @@ impl Config {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        if current_mtime != self.mtime {
-            if self.load().is_ok() {
-                return true;
-            }
+        if current_mtime != self.mtime && self.load().is_ok() {
+            return true;
         }
 
         false
@@ -382,10 +386,8 @@ impl Config {
             Value::Number(n) => Some(n.to_string()),
             Value::Bool(b) => Some(b.to_string()),
             Value::Array(arr) => {
-                let items: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| self.value_to_string(v))
-                    .collect();
+                let items: Vec<String> =
+                    arr.iter().filter_map(|v| self.value_to_string(v)).collect();
                 Some(items.join(","))
             }
             Value::Null => None,
@@ -518,9 +520,9 @@ impl Config {
         let value = self.get(key, default)?;
 
         // Expand ~ to home directory
-        if value.starts_with('~') {
+        if let Some(stripped) = value.strip_prefix('~') {
             if let Some(home) = dirs::home_dir() {
-                return Some(home.join(value[1..].trim_start_matches('/')));
+                return Some(home.join(stripped.trim_start_matches('/')));
             }
         }
 
@@ -557,11 +559,7 @@ impl Config {
         // Check overrides first
         if let Some(value) = self.overrides.get(key) {
             if let Some(arr) = value.as_array() {
-                return Some(
-                    arr.iter()
-                        .filter_map(|v| self.value_to_string(v))
-                        .collect(),
-                );
+                return Some(arr.iter().filter_map(|v| self.value_to_string(v)).collect());
             }
             if let Some(s) = value.as_str() {
                 return Some(s.split(',').map(|s| s.trim().to_string()).collect());
@@ -572,11 +570,7 @@ impl Config {
         let path = key_to_path(key).unwrap_or(key);
         if let Some(value) = self.get_nested(path) {
             if let Some(arr) = value.as_array() {
-                return Some(
-                    arr.iter()
-                        .filter_map(|v| self.value_to_string(v))
-                        .collect(),
-                );
+                return Some(arr.iter().filter_map(|v| self.value_to_string(v)).collect());
             }
             if let Some(s) = value.as_str() {
                 return Some(s.split(',').map(|s| s.trim().to_string()).collect());

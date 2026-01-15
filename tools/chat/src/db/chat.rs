@@ -160,6 +160,7 @@ impl ChatDb {
     }
 
     /// Get statistics about the chat database
+    #[allow(dead_code)]
     pub fn get_stats(&self) -> Result<ChatStats> {
         if !self.exists() {
             return Ok(ChatStats::default());
@@ -168,7 +169,11 @@ impl ChatDb {
         let conn = Connection::open(&self.path)?;
 
         let conversation_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM conversations WHERE is_active = 1", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM conversations WHERE is_active = 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap_or(0);
 
         let message_count: i64 = conn
@@ -190,6 +195,7 @@ impl ChatDb {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct ChatStats {
     pub conversation_count: usize,

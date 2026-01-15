@@ -1,8 +1,8 @@
 //! Query input panel component
 
+use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 
 use crate::app::{App, FocusedPanel};
 use crate::db::DatabaseType;
@@ -52,12 +52,10 @@ pub fn render_query_input(frame: &mut Frame, area: Rect, app: &App) {
         let before: String = app.query_input.chars().take(app.cursor_position).collect();
         let after: String = app.query_input.chars().skip(app.cursor_position).collect();
         format!("{}|{}", before, after)
+    } else if app.query_input.is_empty() {
+        "(Press Tab to focus, then type your query)".to_string()
     } else {
-        if app.query_input.is_empty() {
-            "(Press Tab to focus, then type your query)".to_string()
-        } else {
-            app.query_input.clone()
-        }
+        app.query_input.clone()
     };
 
     let text_style = if focused {
@@ -66,9 +64,7 @@ pub fn render_query_input(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let paragraph = Paragraph::new(display_text)
-        .style(text_style)
-        .block(block);
+    let paragraph = Paragraph::new(display_text).style(text_style).block(block);
 
     frame.render_widget(paragraph, area);
 

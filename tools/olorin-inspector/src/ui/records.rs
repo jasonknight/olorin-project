@@ -1,8 +1,10 @@
 //! Records table panel component with word wrapping
 
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState};
 use ratatui::Frame;
+use ratatui::prelude::*;
+use ratatui::widgets::{
+    Block, Borders, Cell, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState,
+};
 
 use crate::app::{App, FocusedPanel};
 use crate::db::Record;
@@ -118,8 +120,8 @@ pub fn render_records(frame: &mut Frame, area: Rect, app: &App) {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
 
-        let mut scrollbar_state = ScrollbarState::new(app.records.len())
-            .position(app.record_scroll);
+        let mut scrollbar_state =
+            ScrollbarState::new(app.records.len()).position(app.record_scroll);
 
         let scrollbar_area = Rect {
             x: area.x + area.width.saturating_sub(1),
@@ -140,11 +142,7 @@ fn create_row(record: &Record, columns: &[String], col_width: usize) -> Row<'sta
     let cells: Vec<Cell> = columns
         .iter()
         .map(|col| {
-            let value = record
-                .fields
-                .get(col)
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let value = record.fields.get(col).map(|s| s.as_str()).unwrap_or("");
 
             // Truncate long values for list view (full content shown in detail modal)
             let display_value = if value.len() > LIST_VIEW_TRUNCATE {

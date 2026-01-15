@@ -1,11 +1,11 @@
 //! UI rendering with ratatui
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 use crate::app::App;
@@ -17,8 +17,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),    // Chat + input area
-            Constraint::Length(1),  // Status bar
+            Constraint::Min(10),   // Chat + input area
+            Constraint::Length(1), // Status bar
         ])
         .split(frame.area());
 
@@ -26,8 +26,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),     // Chat display (expands)
-            Constraint::Length(5),  // Input area (3 lines + border)
+            Constraint::Min(5),    // Chat display (expands)
+            Constraint::Length(5), // Input area (3 lines + border)
         ])
         .split(chunks[0]);
 
@@ -61,8 +61,12 @@ fn render_chat_display(frame: &mut Frame, app: &App, area: Rect) {
                 };
 
                 let header_style = match chat_msg.role.as_str() {
-                    "user" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    "assistant" => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    "user" => Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                    "assistant" => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                     _ => Style::default().add_modifier(Modifier::BOLD),
                 };
 
@@ -142,10 +146,18 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
     let mut col_widths: Vec<usize> = Vec::new();
 
     let base_style = Style::default().fg(Color::Green);
-    let code_style = Style::default().fg(Color::Rgb(180, 180, 180)).bg(Color::Rgb(40, 40, 40));
-    let header_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
-    let bold_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let italic_style = Style::default().fg(Color::Green).add_modifier(Modifier::ITALIC);
+    let code_style = Style::default()
+        .fg(Color::Rgb(180, 180, 180))
+        .bg(Color::Rgb(40, 40, 40));
+    let header_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let bold_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+    let italic_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::ITALIC);
     let table_border_style = Style::default().fg(Color::DarkGray);
 
     for line in content.lines() {
@@ -153,7 +165,10 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
         if line.trim().starts_with("```") {
             if in_code_block {
                 in_code_block = false;
-                lines.push(Line::from(Span::styled("└─────────────────────────────────────────┘", table_border_style)));
+                lines.push(Line::from(Span::styled(
+                    "└─────────────────────────────────────────┘",
+                    table_border_style,
+                )));
             } else {
                 in_code_block = true;
                 let lang = line.trim().trim_start_matches("```");
@@ -169,21 +184,29 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
 
         if in_code_block {
             // Inside code block - render with code style
-            let padded = format!("│ {:<width$} │", line, width = wrap_width.saturating_sub(4).max(20));
+            let padded = format!(
+                "│ {:<width$} │",
+                line,
+                width = wrap_width.saturating_sub(4).max(20)
+            );
             lines.push(Line::from(Span::styled(padded, code_style)));
             continue;
         }
 
         // Table handling
         if line.trim().starts_with('|') && line.trim().ends_with('|') {
-            let cells: Vec<String> = line.trim()
+            let cells: Vec<String> = line
+                .trim()
                 .trim_matches('|')
                 .split('|')
                 .map(|s| s.trim().to_string())
                 .collect();
 
             // Check if this is a separator row (|---|---|)
-            if cells.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':')) {
+            if cells
+                .iter()
+                .all(|c| c.chars().all(|ch| ch == '-' || ch == ':'))
+            {
                 // Skip separator, we'll draw our own
                 continue;
             }
@@ -213,23 +236,23 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
         }
 
         // Headers
-        if line.starts_with("### ") {
+        if let Some(stripped) = line.strip_prefix("### ") {
             lines.push(Line::from(Span::styled(
-                format!("   {}", &line[4..]),
+                format!("   {}", stripped),
                 header_style,
             )));
             continue;
         }
-        if line.starts_with("## ") {
+        if let Some(stripped) = line.strip_prefix("## ") {
             lines.push(Line::from(Span::styled(
-                format!("  {}", &line[3..]),
+                format!("  {}", stripped),
                 header_style,
             )));
             continue;
         }
-        if line.starts_with("# ") {
+        if let Some(stripped) = line.strip_prefix("# ") {
             lines.push(Line::from(Span::styled(
-                line[2..].to_string(),
+                stripped.to_string(),
                 header_style.add_modifier(Modifier::UNDERLINED),
             )));
             continue;
@@ -238,8 +261,15 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
         // List items
         if line.trim().starts_with("- ") || line.trim().starts_with("* ") {
             let indent = line.len() - line.trim_start().len();
-            let bullet_line = format!("{}• {}", " ".repeat(indent), line.trim()[2..].to_string());
-            lines.extend(wrap_styled_line(&bullet_line, wrap_width, base_style, bold_style, italic_style, code_style));
+            let bullet_line = format!("{}• {}", " ".repeat(indent), &line.trim()[2..]);
+            lines.extend(wrap_styled_line(
+                &bullet_line,
+                wrap_width,
+                base_style,
+                bold_style,
+                italic_style,
+                code_style,
+            ));
             continue;
         }
 
@@ -249,7 +279,14 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
             if prefix.chars().all(|c| c.is_ascii_digit()) {
                 let indent = line.len() - line.trim_start().len();
                 let num_line = format!("{}{}", " ".repeat(indent), line.trim());
-                lines.extend(wrap_styled_line(&num_line, wrap_width, base_style, bold_style, italic_style, code_style));
+                lines.extend(wrap_styled_line(
+                    &num_line,
+                    wrap_width,
+                    base_style,
+                    bold_style,
+                    italic_style,
+                    code_style,
+                ));
                 continue;
             }
         }
@@ -258,7 +295,14 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
         if line.trim().is_empty() {
             lines.push(Line::from(""));
         } else {
-            lines.extend(wrap_styled_line(line, wrap_width, base_style, bold_style, italic_style, code_style));
+            lines.extend(wrap_styled_line(
+                line,
+                wrap_width,
+                base_style,
+                bold_style,
+                italic_style,
+                code_style,
+            ));
         }
     }
 
@@ -271,10 +315,16 @@ fn render_markdown(content: &str, wrap_width: usize) -> Vec<Line<'static>> {
 }
 
 /// Render a table with box drawing characters
-fn render_table(rows: &[Vec<String>], col_widths: &[usize], max_width: usize) -> Vec<Line<'static>> {
+fn render_table(
+    rows: &[Vec<String>],
+    col_widths: &[usize],
+    max_width: usize,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let border_style = Style::default().fg(Color::DarkGray);
-    let header_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let cell_style = Style::default().fg(Color::Green);
 
     if rows.is_empty() || col_widths.is_empty() {
@@ -288,16 +338,21 @@ fn render_table(rows: &[Vec<String>], col_widths: &[usize], max_width: usize) ->
     } else {
         1.0
     };
-    let adjusted_widths: Vec<usize> = col_widths.iter()
+    let adjusted_widths: Vec<usize> = col_widths
+        .iter()
         .map(|w| ((*w as f64 * scale) as usize).max(3))
         .collect();
 
     // Top border
-    let top_border: String = adjusted_widths.iter()
+    let top_border: String = adjusted_widths
+        .iter()
         .map(|w| "─".repeat(*w + 2))
         .collect::<Vec<_>>()
         .join("┬");
-    lines.push(Line::from(Span::styled(format!("┌{}┐", top_border), border_style)));
+    lines.push(Line::from(Span::styled(
+        format!("┌{}┐", top_border),
+        border_style,
+    )));
 
     for (row_idx, row) in rows.iter().enumerate() {
         // Row content
@@ -309,15 +364,23 @@ fn render_table(rows: &[Vec<String>], col_widths: &[usize], max_width: usize) ->
             } else {
                 cell.clone()
             };
-            let style = if row_idx == 0 { header_style } else { cell_style };
-            spans.push(Span::styled(format!(" {:<width$} ", truncated, width = width), style));
+            let style = if row_idx == 0 {
+                header_style
+            } else {
+                cell_style
+            };
+            spans.push(Span::styled(
+                format!(" {:<width$} ", truncated, width = width),
+                style,
+            ));
             spans.push(Span::styled("│", border_style));
         }
         lines.push(Line::from(spans));
 
         // Separator after header
         if row_idx == 0 && rows.len() > 1 {
-            let sep: String = adjusted_widths.iter()
+            let sep: String = adjusted_widths
+                .iter()
                 .map(|w| "─".repeat(*w + 2))
                 .collect::<Vec<_>>()
                 .join("┼");
@@ -326,11 +389,15 @@ fn render_table(rows: &[Vec<String>], col_widths: &[usize], max_width: usize) ->
     }
 
     // Bottom border
-    let bottom_border: String = adjusted_widths.iter()
+    let bottom_border: String = adjusted_widths
+        .iter()
         .map(|w| "─".repeat(*w + 2))
         .collect::<Vec<_>>()
         .join("┴");
-    lines.push(Line::from(Span::styled(format!("└{}┘", bottom_border), border_style)));
+    lines.push(Line::from(Span::styled(
+        format!("└{}┘", bottom_border),
+        border_style,
+    )));
 
     lines
 }
@@ -494,7 +561,7 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
             if line.is_empty() {
                 visual_row += 1;
             } else {
-                let wrapped_count = (line.len() + wrap_width - 1) / wrap_width;
+                let wrapped_count = line.len().div_ceil(wrap_width);
                 visual_row += wrapped_count.max(1) as u16;
             }
         } else {
@@ -514,7 +581,10 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
     // Position cursor (clamped to visible area)
     let visible_height = inner.height;
     if visual_row < visible_height {
-        let cursor_x = inner.x.saturating_add(visual_col).min(inner.x + inner.width - 1);
+        let cursor_x = inner
+            .x
+            .saturating_add(visual_col)
+            .min(inner.x + inner.width - 1);
         let cursor_y = inner.y.saturating_add(visual_row);
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -522,11 +592,7 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the status bar
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let scroll_indicator = if app.auto_scroll {
-        ""
-    } else {
-        " [SCROLLED] "
-    };
+    let scroll_indicator = if app.auto_scroll { "" } else { " [SCROLLED] " };
 
     let status_text = format!(
         " {} | Msgs: {}{} | Enter: Send | Shift+Enter: Newline | Esc: Quit ",

@@ -3,5 +3,4 @@
 pub mod chat;
 pub mod context;
 
-pub use chat::{ChatDb, MessageCheckResult};
-pub use context::ContextDb;
+pub use chat::ChatDb;
