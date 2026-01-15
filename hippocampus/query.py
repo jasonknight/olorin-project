@@ -11,11 +11,11 @@ import re
 import readline
 import chromadb
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
+from libs.embeddings import Embedder
 
 # Initialize config
 config = Config()
@@ -27,7 +27,6 @@ class QueryREPL:
         chromadb_host = config.get("CHROMADB_HOST", "localhost")
         chromadb_port = config.get_int("CHROMADB_PORT", 8000)
         collection_name = config.get("CHROMADB_COLLECTION", "documents")
-        embedding_model_name = config.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
         self.default_n_results = config.get_int("DEFAULT_RESULTS", 5)
 
         print(f"Connecting to ChromaDB at {chromadb_host}:{chromadb_port}...")
@@ -49,9 +48,9 @@ class QueryREPL:
                 "Warning: No documents in collection. Run ingest.py first to add documents."
             )
 
-        # Load embedding model
-        print(f"Loading embedding model: {embedding_model_name}...")
-        self.model = SentenceTransformer(embedding_model_name)
+        # Initialize embedder (shared singleton)
+        self.embedder = Embedder.get_instance(config=config)
+        print(f"Embedder ready: {self.embedder.model_name}")
 
         # Cache all documents for direct search
         print("Caching documents for hybrid search...")
@@ -111,7 +110,7 @@ class QueryREPL:
             n_results = self.default_n_results
 
         # Generate query embedding
-        query_embedding = self.model.encode([query_text])[0]
+        query_embedding = self.embedder.embed_query(query_text)
 
         # Query ChromaDB
         results = self.collection.query(

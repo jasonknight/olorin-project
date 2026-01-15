@@ -14,11 +14,11 @@ from datetime import datetime
 
 import chromadb
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
+from libs.embeddings import Embedder
 from libs.olorin_logging import OlorinLogger
 
 # Add broca directory to path for producer import
@@ -47,8 +47,6 @@ class DocumentIngestionPipeline:
         self.chromadb_host = config.get("CHROMADB_HOST", "localhost")
         self.chromadb_port = config.get_int("CHROMADB_PORT", 8000)
         self.collection_name = config.get("CHROMADB_COLLECTION", "documents")
-
-        self.embedding_model_name = config.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
         self.chunk_size = config.get_int("CHUNK_SIZE", 1000)
         self.chunk_overlap = config.get_int("CHUNK_OVERLAP", 200)
@@ -92,11 +90,10 @@ class DocumentIngestionPipeline:
             min_chunk_size=self.chunk_min_size,
         )
 
-        # Initialize embedding model
-        self.logger.info(f"Loading embedding model: {self.embedding_model_name}")
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
+        # Initialize embedder (shared singleton)
+        self.embedder = Embedder.get_instance(config=config)
         self.logger.info(
-            f"Model loaded (dimension: {self.embedding_model.get_sentence_embedding_dimension()})"
+            f"Embedder ready: {self.embedder.model_name} (dimension: {self.embedder.dimension})"
         )
 
         # Initialize ChromaDB client
@@ -209,9 +206,7 @@ class DocumentIngestionPipeline:
             # Generate embeddings for all chunks
             chunk_texts = [chunk["text"] for chunk in chunks]
             self.logger.debug(f"Generating embeddings for {len(chunk_texts)} chunks...")
-            embeddings = self.embedding_model.encode(
-                chunk_texts, show_progress_bar=False, convert_to_numpy=True
-            )
+            embeddings = self.embedder.embed_documents(chunk_texts)
 
             # Prepare data for ChromaDB
             ids = []

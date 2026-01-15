@@ -29,6 +29,17 @@ except ImportError:
 
 from file_tracker import FileTracker
 
+# Optional: macOS Vision framework for OCR fallback
+VISION_AVAILABLE = False
+try:
+    import Vision
+    from Foundation import NSData
+
+    VISION_AVAILABLE = True
+except ImportError:
+    Vision = None
+    NSData = None
+
 
 class PDFTracker:
     """
@@ -118,6 +129,15 @@ class PDFTracker:
                 self.logger.warning(
                     "Ollama not available - falling back to heuristics only"
                 )
+
+        # Check Vision OCR availability (macOS)
+        self.vision_available = VISION_AVAILABLE
+        if self.vision_available:
+            self.logger.info("macOS Vision OCR available for image-based PDFs")
+        else:
+            self.logger.debug(
+                "macOS Vision OCR not available (install pyobjc-framework-Vision)"
+            )
 
         # Create directories if they don't exist
         os.makedirs(self.input_dir, exist_ok=True)
@@ -212,6 +232,61 @@ class PDFTracker:
             return False
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
             return False
+
+    def _extract_with_vision(self, page, dpi: int = 150) -> Optional[str]:
+        """
+        Use macOS Vision framework for OCR on a PDF page.
+
+        Args:
+            page: PyMuPDF page object
+            dpi: Resolution for rendering (higher = better quality but slower)
+
+        Returns:
+            Extracted text or None if Vision is not available
+        """
+        if not self.vision_available:
+            return None
+
+        try:
+            # Render page to image
+            pix = page.get_pixmap(dpi=dpi)
+            img_data = pix.tobytes("png")
+
+            # Create NSData from image bytes
+            ns_data = NSData.dataWithBytes_length_(img_data, len(img_data))
+
+            # Create Vision request handler
+            handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(
+                ns_data, None
+            )
+
+            # Create text recognition request
+            request = Vision.VNRecognizeTextRequest.alloc().init()
+            request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+
+            # Perform request
+            success, error = handler.performRequests_error_([request], None)
+
+            if not success:
+                self.logger.debug(f"Vision OCR failed: {error}")
+                return None
+
+            # Extract text from results
+            results = request.results()
+            if not results:
+                return ""
+
+            lines = []
+            for observation in results:
+                candidates = observation.topCandidates_(1)
+                if candidates:
+                    lines.append(candidates[0].string())
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            self.logger.debug(f"Vision OCR error: {e}")
+            return None
 
     def _calculate_content_density(self, text: str) -> float:
         """
@@ -625,12 +700,25 @@ Format: YES 0.9 or NO 0.3"""
 
         # First pass: Extract all page texts
         pages_text = []
+        ocr_pages = 0
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text()
+
+            # If standard extraction returned empty, try OCR
+            if not text.strip() and self.vision_available:
+                ocr_text = self._extract_with_vision(page)
+                if ocr_text and ocr_text.strip():
+                    text = ocr_text
+                    ocr_pages += 1
+                    self.logger.debug(f"Page {page_num + 1}: Used Vision OCR")
+
             pages_text.append(text)
 
         doc.close()
+
+        if ocr_pages > 0:
+            self.logger.info(f"Used Vision OCR for {ocr_pages}/{len(pages_text)} pages")
 
         # Detect repeated patterns (headers/footers)
         self.logger.debug(f"Analyzing {len(pages_text)} pages for repeated patterns...")

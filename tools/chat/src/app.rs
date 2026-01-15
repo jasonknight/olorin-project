@@ -7,17 +7,17 @@ use std::thread;
 use std::time::Duration;
 use tui_textarea::TextArea;
 
-use crate::db::{ChatDb, ContextDb};
+use crate::db::ChatDb;
 use crate::kafka::KafkaProducer;
-use crate::message::{ChatMessage, ContextInfo, DisplayMessage};
+use crate::message::{ChatMessage, DisplayMessage};
 
 /// Messages sent from background threads to the main app
 #[derive(Debug)]
 pub enum AppEvent {
     /// New chat messages from the database
     NewChatMessages(Vec<ChatMessage>),
-    /// New context retrievals detected
-    NewContextInfo(Vec<ContextInfo>),
+    /// Updated chat messages (streaming updates to existing messages)
+    UpdatedChatMessages(Vec<ChatMessage>),
     /// Error occurred in background thread
     Error(String),
 }
@@ -47,14 +47,13 @@ pub struct App<'a> {
 impl<'a> App<'a> {
     pub fn new(
         chat_db_path: PathBuf,
-        context_db_path: PathBuf,
         bootstrap_servers: &str,
     ) -> Result<Self> {
         // Create channel for background events
         let (tx, rx) = mpsc::channel();
 
         // Start database monitoring thread
-        Self::start_db_monitor(tx, chat_db_path, context_db_path);
+        Self::start_db_monitor(tx, chat_db_path);
 
         // Create Kafka producer
         let producer = match KafkaProducer::new(bootstrap_servers, "ai_in") {
@@ -84,10 +83,9 @@ impl<'a> App<'a> {
     }
 
     /// Start the database monitoring background thread
-    fn start_db_monitor(tx: Sender<AppEvent>, chat_db_path: PathBuf, context_db_path: PathBuf) {
+    fn start_db_monitor(tx: Sender<AppEvent>, chat_db_path: PathBuf) {
         thread::spawn(move || {
             let mut chat_db = ChatDb::new(chat_db_path);
-            let mut context_db = ContextDb::new(context_db_path);
 
             // Initial load of chat messages
             match chat_db.get_all_messages() {
@@ -100,45 +98,29 @@ impl<'a> App<'a> {
                 _ => {}
             }
 
-            // Initial load of context info
-            match context_db.get_new_contexts() {
-                Ok(contexts) if !contexts.is_empty() => {
-                    let _ = tx.send(AppEvent::NewContextInfo(contexts));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::Error(format!("Context DB error: {}", e)));
-                }
-                _ => {}
-            }
-
             // Poll loop
             loop {
                 thread::sleep(Duration::from_millis(150));
 
-                // Check for new chat messages
-                match chat_db.get_new_messages() {
-                    Ok(messages) if !messages.is_empty() => {
-                        if tx.send(AppEvent::NewChatMessages(messages)).is_err() {
-                            break; // Channel closed, exit thread
+                // Check for new and updated chat messages
+                match chat_db.get_new_and_updated_messages() {
+                    Ok(result) => {
+                        // Send new messages
+                        if !result.new_messages.is_empty() {
+                            if tx.send(AppEvent::NewChatMessages(result.new_messages)).is_err() {
+                                break; // Channel closed, exit thread
+                            }
+                        }
+                        // Send updated messages (streaming updates)
+                        if !result.updated_messages.is_empty() {
+                            if tx.send(AppEvent::UpdatedChatMessages(result.updated_messages)).is_err() {
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
                         let _ = tx.send(AppEvent::Error(format!("Chat DB error: {}", e)));
                     }
-                    _ => {}
-                }
-
-                // Check for new context retrievals
-                match context_db.get_new_contexts() {
-                    Ok(contexts) if !contexts.is_empty() => {
-                        if tx.send(AppEvent::NewContextInfo(contexts)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AppEvent::Error(format!("Context DB error: {}", e)));
-                    }
-                    _ => {}
                 }
             }
         });
@@ -159,14 +141,22 @@ impl<'a> App<'a> {
                         self.scroll_offset = 0;
                     }
                 }
-                AppEvent::NewContextInfo(contexts) => {
-                    for ctx in contexts {
-                        let sys_msg = ctx.to_system_message();
-                        self.messages.push(DisplayMessage::System(sys_msg));
+                AppEvent::UpdatedChatMessages(updated_messages) => {
+                    // Update existing messages in place (for streaming updates)
+                    for updated_msg in updated_messages {
+                        // Find the existing message by ID and replace it
+                        for existing in &mut self.messages {
+                            if let DisplayMessage::Chat(ref mut chat_msg) = existing {
+                                if chat_msg.id == updated_msg.id {
+                                    // Update the content and updated_at timestamp
+                                    chat_msg.content = updated_msg.content.clone();
+                                    chat_msg.updated_at = updated_msg.updated_at;
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    // Sort messages by timestamp
-                    self.messages.sort_by_key(|m| m.created_at());
-                    // Only auto-scroll if enabled
+                    // Auto-scroll to show updated content
                     if self.auto_scroll {
                         self.scroll_offset = 0;
                     }

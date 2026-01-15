@@ -2,6 +2,30 @@
 
 use std::collections::HashMap;
 
+/// Connection state for databases that require network connectivity
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionState {
+    /// Database is connected and operational
+    Connected,
+    /// Database is disconnected with error message
+    Disconnected(String),
+    /// Connection state is unknown (not yet checked)
+    Unknown,
+}
+
+impl ConnectionState {
+    pub fn is_available(&self) -> bool {
+        matches!(self, ConnectionState::Connected)
+    }
+
+    pub fn error_message(&self) -> Option<&str> {
+        match self {
+            ConnectionState::Disconnected(msg) => Some(msg),
+            _ => None,
+        }
+    }
+}
+
 /// Represents a single record from any database
 #[derive(Debug, Clone)]
 pub struct Record {
@@ -45,6 +69,8 @@ pub struct DatabaseInfo {
     pub record_count: usize,
     pub columns: Vec<String>,
     pub table_name: String,
+    /// Connection state (for network-based databases like ChromaDB)
+    pub connection_state: ConnectionState,
 }
 
 /// Type of database
@@ -95,8 +121,16 @@ pub enum DbError {
 
 /// Common interface for all database sources
 pub trait DatabaseSource {
-    /// Get database metadata
+    /// Get database metadata (immutable)
     fn info(&self) -> &DatabaseInfo;
+
+    /// Get database metadata (mutable, for updating connection state)
+    #[allow(dead_code)]
+    fn info_mut(&mut self) -> &mut DatabaseInfo;
+
+    /// Check if the database is currently reachable
+    /// Updates internal connection state and returns true if healthy
+    fn health_check(&mut self) -> bool;
 
     /// Fetch most recent records (for initial load and refresh)
     /// Returns records in descending time order

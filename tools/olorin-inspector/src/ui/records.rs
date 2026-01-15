@@ -132,6 +132,9 @@ pub fn render_records(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Maximum characters to show in list view before truncating
+const LIST_VIEW_TRUNCATE: usize = 200;
+
 /// Create a table row from a record with word wrapping
 fn create_row(record: &Record, columns: &[String], col_width: usize) -> Row<'static> {
     let cells: Vec<Cell> = columns
@@ -143,18 +146,32 @@ fn create_row(record: &Record, columns: &[String], col_width: usize) -> Row<'sta
                 .map(|s| s.as_str())
                 .unwrap_or("");
 
+            // Truncate long values for list view (full content shown in detail modal)
+            let display_value = if value.len() > LIST_VIEW_TRUNCATE {
+                let truncated: String = value.chars().take(LIST_VIEW_TRUNCATE).collect();
+                truncated + "..."
+            } else {
+                value.to_string()
+            };
+
             // Word wrap the value
-            let wrapped = wrap_text(value, col_width);
+            let wrapped = wrap_text(&display_value, col_width);
             Cell::from(wrapped)
         })
         .collect();
 
-    // Calculate row height based on maximum wrapped lines
+    // Calculate row height based on maximum wrapped lines (using truncated values)
     let max_lines = columns
         .iter()
         .map(|col| {
             let value = record.fields.get(col).map(|s| s.as_str()).unwrap_or("");
-            count_wrapped_lines(value, col_width)
+            let display_value = if value.len() > LIST_VIEW_TRUNCATE {
+                let truncated: String = value.chars().take(LIST_VIEW_TRUNCATE).collect();
+                truncated + "..."
+            } else {
+                value.to_string()
+            };
+            count_wrapped_lines(&display_value, col_width)
         })
         .max()
         .unwrap_or(1);

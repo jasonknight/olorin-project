@@ -5,29 +5,73 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
 use crate::app::{App, FocusedPanel};
+use crate::db::{ConnectionState, DatabaseType};
 
 /// Render the database list panel (left side)
 pub fn render_db_list(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == FocusedPanel::DatabaseList;
 
-    // Create list items
+    // Create list items with connection status indicators
     let items: Vec<ListItem> = app
         .databases
         .iter()
         .enumerate()
         .map(|(i, db)| {
             let info = db.info();
-            let text = format!("{} ({})", info.name, info.record_count);
+            let is_selected = i == app.selected_db;
 
-            let style = if i == app.selected_db {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+            // Connection status indicator for network databases
+            let (status_icon, status_style) = if info.db_type == DatabaseType::ChromaDB {
+                match &info.connection_state {
+                    ConnectionState::Connected => ("●", Color::Green),
+                    ConnectionState::Disconnected(_) => ("○", Color::Red),
+                    ConnectionState::Unknown => ("?", Color::Yellow),
+                }
             } else {
-                Style::default().fg(Color::White)
+                // SQLite databases are always "connected"
+                ("●", Color::Green)
             };
 
-            ListItem::new(text).style(style)
+            // Create styled spans
+            let line = if is_selected {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", status_icon),
+                        Style::default().fg(status_style),
+                    ),
+                    Span::styled(
+                        if info.connection_state.is_available() {
+                            format!("{} ({})", info.name, info.record_count)
+                        } else {
+                            format!("{} (offline)", info.name)
+                        },
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} ", status_icon),
+                        Style::default().fg(status_style),
+                    ),
+                    Span::styled(
+                        if info.connection_state.is_available() {
+                            format!("{} ({})", info.name, info.record_count)
+                        } else {
+                            format!("{} (offline)", info.name)
+                        },
+                        Style::default().fg(if info.connection_state.is_available() {
+                            Color::White
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                ])
+            };
+
+            ListItem::new(line)
         })
         .collect();
 

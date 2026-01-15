@@ -23,11 +23,11 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import chromadb
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
+from libs.embeddings import Embedder
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
 
@@ -121,9 +121,6 @@ class EnrichenerConfig:
             "CONTEXT_DB_PATH", "./hippocampus/data/context.db"
         )
 
-        # Embedding settings
-        self.embedding_model = self.cfg.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-
         # Thread pool
         self.thread_pool_size = self.cfg.get_int("ENRICHENER_THREAD_POOL_SIZE", 3)
 
@@ -167,7 +164,6 @@ def load_config() -> EnrichenerConfig:
     logger.info(f"  ChromaDB Collection: {enrichener_cfg.chromadb_collection}")
     logger.info(f"  ChromaDB Results: {enrichener_cfg.chromadb_n_results}")
     logger.info(f"  Context DB: {enrichener_cfg.context_db_path}")
-    logger.info(f"  Embedding Model: {enrichener_cfg.embedding_model}")
     logger.info(f"  Thread Pool Size: {enrichener_cfg.thread_pool_size}")
     logger.info(f"  Log Level: {enrichener_cfg.log_level}")
 
@@ -321,13 +317,14 @@ class PromptEnricher:
             raise
 
     def _init_embedding_model(self):
-        """Initialize sentence transformer for query embedding"""
-        logger.info(f"Loading embedding model: {self.config.embedding_model}...")
+        """Initialize embedder (shared singleton)"""
         try:
-            self.embedding_model = SentenceTransformer(self.config.embedding_model)
-            logger.info("Embedding model loaded successfully")
+            self.embedder = Embedder.get_instance()
+            logger.info(
+                f"Embedder ready: {self.embedder.model_name} (dimension: {self.embedder.dimension})"
+            )
         except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}", exc_info=True)
+            logger.error(f"Failed to initialize embedder: {e}", exc_info=True)
             raise
 
     def _init_openai_client(self):
@@ -496,7 +493,7 @@ class PromptEnricher:
 
         try:
             # Embed the query
-            query_embedding = self.embedding_model.encode([prompt])[0]
+            query_embedding = self.embedder.embed_query(prompt)
 
             # Query ChromaDB
             results = self.collection.query(

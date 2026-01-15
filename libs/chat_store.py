@@ -4,13 +4,14 @@ Chat store module using SQLite to manage conversation history.
 Stores user and assistant messages for multi-turn conversations.
 """
 
+import json
 import sqlite3
 import hashlib
 import os
 import uuid
 import threading
 from datetime import datetime
-from typing import Optional, List, Dict, Tuple
+from typing import Any, Optional, List, Dict, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,15 @@ class ChatStore:
                 content_hash TEXT NOT NULL,
                 prompt_id TEXT,
                 created_at TIMESTAMP NOT NULL,
+                message_type TEXT DEFAULT 'message',
+                metadata TEXT,
+                updated_at TIMESTAMP,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             )
         """)
+
+        # Migration: add new columns to existing databases
+        self._migrate_messages_table(conn)
 
         # Index for looking up messages by conversation_id
         conn.execute("""
@@ -96,8 +103,37 @@ class ChatStore:
             ON conversations(last_message_at)
         """)
 
+        # Index for message type queries
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_message_type
+            ON messages(message_type)
+        """)
+
         conn.commit()
         logger.debug("Database schema initialized")
+
+    def _migrate_messages_table(self, conn: sqlite3.Connection):
+        """Add new columns to existing messages table if they don't exist."""
+        cursor = conn.execute("PRAGMA table_info(messages)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        migrations = [
+            ("message_type", "TEXT DEFAULT 'message'"),
+            ("metadata", "TEXT"),
+            ("updated_at", "TIMESTAMP"),
+        ]
+
+        for column_name, column_def in migrations:
+            if column_name not in existing_columns:
+                try:
+                    conn.execute(
+                        f"ALTER TABLE messages ADD COLUMN {column_name} {column_def}"
+                    )
+                    logger.info(f"Migrated messages table: added {column_name} column")
+                except sqlite3.OperationalError as e:
+                    # Column might already exist from a concurrent migration
+                    if "duplicate column name" not in str(e).lower():
+                        raise
 
     @staticmethod
     def _compute_hash(content: str) -> str:
@@ -180,7 +216,12 @@ class ChatStore:
     # =========================================================================
 
     def add_user_message(
-        self, conversation_id: str, content: str, prompt_id: Optional[str] = None
+        self,
+        conversation_id: str,
+        content: str,
+        prompt_id: Optional[str] = None,
+        message_type: str = "message",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Add a user message to the conversation.
@@ -189,24 +230,38 @@ class ChatStore:
             conversation_id: ID of the conversation
             content: Message content
             prompt_id: Optional original Kafka message ID
+            message_type: Type of message ('message', 'context_user', 'system')
+            metadata: Optional JSON-serializable metadata dict
 
         Returns:
             message_id (UUID string)
         """
-        return self._add_message(conversation_id, "user", content, prompt_id)
+        return self._add_message(
+            conversation_id, "user", content, prompt_id, message_type, metadata
+        )
 
-    def add_assistant_message(self, conversation_id: str, content: str) -> str:
+    def add_assistant_message(
+        self,
+        conversation_id: str,
+        content: str,
+        message_type: str = "message",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Add an assistant message to the conversation.
 
         Args:
             conversation_id: ID of the conversation
             content: Message content
+            message_type: Type of message ('message', 'context_ack', 'system')
+            metadata: Optional JSON-serializable metadata dict
 
         Returns:
             message_id (UUID string)
         """
-        return self._add_message(conversation_id, "assistant", content)
+        return self._add_message(
+            conversation_id, "assistant", content, None, message_type, metadata
+        )
 
     def _add_message(
         self,
@@ -214,6 +269,8 @@ class ChatStore:
         role: str,
         content: str,
         prompt_id: Optional[str] = None,
+        message_type: str = "message",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Internal method to add a message to the conversation.
@@ -223,6 +280,8 @@ class ChatStore:
             role: Message role ('user' or 'assistant')
             content: Message content
             prompt_id: Optional original Kafka message ID
+            message_type: Type of message ('message', 'context_user', 'context_ack', 'system')
+            metadata: Optional JSON-serializable metadata dict
 
         Returns:
             message_id (UUID string)
@@ -231,14 +290,27 @@ class ChatStore:
         message_id = str(uuid.uuid4())
         content_hash = self._compute_hash(content)
         now = datetime.now().isoformat()
+        metadata_json = json.dumps(metadata) if metadata else None
 
         # Insert message
         conn.execute(
             """
-            INSERT INTO messages (id, conversation_id, role, content, content_hash, prompt_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, conversation_id, role, content, content_hash,
+                                  prompt_id, created_at, message_type, metadata, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, conversation_id, role, content, content_hash, prompt_id, now),
+            (
+                message_id,
+                conversation_id,
+                role,
+                content,
+                content_hash,
+                prompt_id,
+                now,
+                message_type,
+                metadata_json,
+                now,
+            ),
         )
 
         # Update conversation metadata
@@ -254,13 +326,16 @@ class ChatStore:
         conn.commit()
 
         logger.debug(
-            f"Added {role} message {message_id} to conversation {conversation_id}"
+            f"Added {role} message {message_id} (type={message_type}) to conversation {conversation_id}"
         )
         return message_id
 
     def update_message(self, message_id: str, content: str) -> bool:
         """
         Update the content of an existing message (used for streaming updates).
+
+        Only updates content and updated_at timestamp, preserving the original
+        created_at timestamp for stable message ordering.
 
         Args:
             message_id: ID of the message to update
@@ -276,7 +351,7 @@ class ChatStore:
         cursor = conn.execute(
             """
             UPDATE messages
-            SET content = ?, content_hash = ?, created_at = ?
+            SET content = ?, content_hash = ?, updated_at = ?
             WHERE id = ?
             """,
             (content, content_hash, now, message_id),
@@ -296,19 +371,30 @@ class ChatStore:
             conversation_id: ID of the conversation
 
         Returns:
-            List of dicts with 'role', 'content', 'created_at', etc.
+            List of dicts with 'role', 'content', 'created_at', 'message_type', 'metadata', etc.
         """
         conn = self._get_connection()
         cursor = conn.execute(
             """
-            SELECT id, conversation_id, role, content, prompt_id, created_at
+            SELECT id, conversation_id, role, content, prompt_id, created_at,
+                   message_type, metadata, updated_at
             FROM messages
             WHERE conversation_id = ?
             ORDER BY created_at ASC
             """,
             (conversation_id,),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        rows = []
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            # Parse metadata JSON if present
+            if row_dict.get("metadata"):
+                try:
+                    row_dict["metadata"] = json.loads(row_dict["metadata"])
+                except json.JSONDecodeError:
+                    pass  # Keep as string if not valid JSON
+            rows.append(row_dict)
+        return rows
 
     # =========================================================================
     # Utility Methods

@@ -9,6 +9,9 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     pub created_at: DateTime<Local>,
+    pub message_type: Option<String>,
+    pub metadata: Option<String>,
+    pub updated_at: Option<DateTime<Local>>,
 }
 
 impl ChatMessage {
@@ -17,27 +20,104 @@ impl ChatMessage {
         role: String,
         content: String,
         created_at_str: String,
+        message_type: Option<String>,
+        metadata: Option<String>,
+        updated_at_str: Option<String>,
     ) -> Self {
         // Parse the timestamp - try multiple formats
         let created_at = parse_timestamp(&created_at_str);
+        let updated_at = updated_at_str.map(|s| parse_timestamp(&s));
 
         Self {
             id,
             role,
             content,
             created_at,
+            message_type,
+            metadata,
+            updated_at,
         }
+    }
+
+    /// Check if this is a context injection message
+    pub fn is_context_message(&self) -> bool {
+        matches!(
+            self.message_type.as_deref(),
+            Some("context_user") | Some("context_ack")
+        )
     }
 
     /// Format the message for display
     pub fn format_display(&self) -> String {
         let time = self.created_at.format("%H:%M:%S");
-        let role_display = match self.role.as_str() {
-            "user" => "You",
-            "assistant" => "AI",
+        let msg_type = self.message_type.as_deref().unwrap_or("message");
+
+        let role_display = match (self.role.as_str(), msg_type) {
+            (_, "context_user") => "Context",
+            (_, "context_ack") => "AI",
+            ("user", _) => "You",
+            ("assistant", _) => "AI",
             _ => &self.role,
         };
-        format!("[{}] {}: {}", time, role_display, self.content)
+
+        // For context messages, show a condensed indicator
+        if msg_type == "context_user" {
+            // Show condensed context indicator instead of full content
+            let chunk_info = self.get_context_chunk_info();
+            format!("[{}] {}: {}", time, role_display, chunk_info)
+        } else if msg_type == "context_ack" {
+            // Skip the generic ack message in display
+            format!("[{}] {}: (context acknowledged)", time, role_display)
+        } else {
+            format!("[{}] {}: {}", time, role_display, self.content)
+        }
+    }
+
+    /// Extract context chunk info from metadata for display
+    fn get_context_chunk_info(&self) -> String {
+        if let Some(ref metadata) = self.metadata {
+            // Try to parse the JSON metadata
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata) {
+                let chunk_count = meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let sources = meta.get("sources").and_then(|v| v.as_array());
+                let distances = meta.get("distances").and_then(|v| v.as_array());
+
+                let source_info = if let Some(srcs) = sources {
+                    let unique_sources: Vec<_> = srcs
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .take(2)
+                        .collect();
+                    if unique_sources.is_empty() {
+                        String::new()
+                    } else if unique_sources.len() == 1 {
+                        format!(" from \"{}\"", unique_sources[0])
+                    } else {
+                        format!(" from {} sources", unique_sources.len())
+                    }
+                } else {
+                    String::new()
+                };
+
+                let relevance_info = if let Some(dists) = distances {
+                    let valid_dists: Vec<f64> = dists.iter().filter_map(|d| d.as_f64()).collect();
+                    if !valid_dists.is_empty() {
+                        let avg_dist = valid_dists.iter().sum::<f64>() / valid_dists.len() as f64;
+                        format!(" (relevance: {:.0}%)", (1.0 - avg_dist) * 100.0)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+
+                return format!("{} chunk(s) retrieved{}{}", chunk_count, source_info, relevance_info);
+            }
+        }
+        // Fallback if metadata parsing fails
+        "Context chunks retrieved".to_string()
     }
 }
 

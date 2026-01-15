@@ -635,13 +635,34 @@ class ExoConsumer:
                 # Store context exchange in chat history so it persists for follow-up questions
                 # This ensures the LLM has access to context in subsequent turns
                 try:
+                    # Build metadata with context chunk info for audit trail
+                    context_metadata = {
+                        "context_ids": [
+                            ctx.get("id") for ctx in context_chunks if ctx.get("id")
+                        ],
+                        "sources": [
+                            ctx.get("source")
+                            for ctx in context_chunks
+                            if ctx.get("source")
+                        ],
+                        "distances": [
+                            ctx.get("distance")
+                            for ctx in context_chunks
+                            if ctx.get("distance") is not None
+                        ],
+                        "chunk_count": len(context_chunks),
+                    }
                     self.chat_store.add_user_message(
                         conversation_id,
                         context_exchange[0]["content"],
                         prompt_id=f"{message_id}_context",
+                        message_type="context_user",
+                        metadata=context_metadata,
                     )
                     self.chat_store.add_assistant_message(
-                        conversation_id, context_exchange[1]["content"]
+                        conversation_id,
+                        context_exchange[1]["content"],
+                        message_type="context_ack",
                     )
                     logger.info(
                         f"[{thread_name}] Stored context exchange in chat history for conversation continuity"

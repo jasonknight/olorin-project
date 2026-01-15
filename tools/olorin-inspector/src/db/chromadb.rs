@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use super::traits::{DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record};
+use super::traits::{ConnectionState, DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record};
 
 #[derive(Serialize)]
 struct ChromaGetRequest {
@@ -13,13 +13,6 @@ struct ChromaGetRequest {
     limit: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<usize>,
-    include: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct ChromaQueryRequest {
-    query_texts: Vec<String>,
-    n_results: usize,
     include: Vec<String>,
 }
 
@@ -38,20 +31,11 @@ struct ChromaGetResponse {
 }
 
 #[derive(Deserialize, Debug)]
-struct ChromaQueryResponse {
-    ids: Vec<Vec<String>>,
-    #[serde(default)]
-    documents: Option<Vec<Vec<Option<String>>>>,
-    #[serde(default)]
-    metadatas: Option<Vec<Vec<Option<HashMap<String, serde_json::Value>>>>>,
-    #[serde(default)]
-    distances: Option<Vec<Vec<f64>>>,
-}
-
-#[derive(Deserialize, Debug)]
 struct ChromaCollectionInfo {
+    id: String,
     name: String,
     #[serde(default)]
+    #[allow(dead_code)]
     metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -61,6 +45,8 @@ pub struct ChromaDbSource {
     client: Client,
     base_url: String,
     collection_id: String,
+    /// Current pagination offset (ChromaDB uses offset-based pagination)
+    current_offset: std::cell::Cell<usize>,
 }
 
 impl ChromaDbSource {
@@ -75,7 +61,11 @@ impl ChromaDbSource {
             .timeout(std::time::Duration::from_secs(10))
             .build()?;
 
-        let base_url = format!("http://{}:{}/api/v1", host, port);
+        // Use v2 API with default tenant and database
+        let base_url = format!(
+            "http://{}:{}/api/v2/tenants/default_tenant/databases/default_database",
+            host, port
+        );
 
         // Get collection by name
         let collections_url = format!("{}/collections", base_url);
@@ -91,8 +81,11 @@ impl ChromaDbSource {
             .find(|c| c.name == collection)
             .ok_or_else(|| DbError::NotFound(format!("Collection '{}' not found", collection)))?;
 
-        // Get count
-        let count_url = format!("{}/collections/{}/count", base_url, collection);
+        // Store the collection UUID for API calls
+        let collection_uuid = collection_info.id.clone();
+
+        // Get count using UUID
+        let count_url = format!("{}/collections/{}/count", base_url, collection_uuid);
         let count: usize = client
             .get(&count_url)
             .send()
@@ -117,10 +110,12 @@ impl ChromaDbSource {
                 record_count: count,
                 columns,
                 table_name: collection_info.name.clone(),
+                connection_state: ConnectionState::Connected,
             },
             client,
             base_url,
-            collection_id: collection.to_string(),
+            collection_id: collection_uuid,
+            current_offset: std::cell::Cell::new(0),
         })
     }
 
@@ -136,12 +131,9 @@ impl ChromaDbSource {
                 let mut record = Record::new();
                 record.fields.insert("id".to_string(), id);
 
-                // Add document content (truncated)
+                // Add document content (full - truncation happens in UI)
                 if let Some(Some(doc)) = documents.get(i) {
-                    let truncated: String = doc.chars().take(150).collect();
-                    record
-                        .fields
-                        .insert("document".to_string(), truncated + "...");
+                    record.fields.insert("document".to_string(), doc.clone());
                 }
 
                 // Add metadata fields
@@ -163,6 +155,12 @@ impl ChromaDbSource {
                     }
                 }
 
+                // Ensure timestamp is set for pagination (ChromaDB uses offset-based)
+                // Use a placeholder if no timestamp in metadata
+                if record.timestamp.is_none() {
+                    record.timestamp = Some(format!("offset_{}", i));
+                }
+
                 record
             })
             .collect()
@@ -174,9 +172,47 @@ impl DatabaseSource for ChromaDbSource {
         &self.info
     }
 
+    fn info_mut(&mut self) -> &mut DatabaseInfo {
+        &mut self.info
+    }
+
+    fn health_check(&mut self) -> bool {
+        // Use the v2 heartbeat endpoint to check if ChromaDB is running
+        // Extract host:port from base_url and use /api/v2/heartbeat
+        let heartbeat_url = self
+            .base_url
+            .replace("/tenants/default_tenant/databases/default_database", "/heartbeat");
+
+        match self.client.get(&heartbeat_url).send() {
+            Ok(response) if response.status().is_success() => {
+                self.info.connection_state = ConnectionState::Connected;
+                true
+            }
+            Ok(response) => {
+                self.info.connection_state = ConnectionState::Disconnected(format!(
+                    "ChromaDB returned status {}",
+                    response.status()
+                ));
+                false
+            }
+            Err(e) => {
+                let msg = if e.is_connect() {
+                    "ChromaDB not running".to_string()
+                } else if e.is_timeout() {
+                    "ChromaDB connection timeout".to_string()
+                } else {
+                    format!("ChromaDB error: {}", e)
+                };
+                self.info.connection_state = ConnectionState::Disconnected(msg);
+                false
+            }
+        }
+    }
+
     fn fetch_recent(&self, limit: usize) -> Result<Vec<Record>, DbError> {
-        // ChromaDB doesn't have native ordering, so we fetch and return as-is
-        // The IDs are typically timestamp-based so newer entries come later
+        // Reset pagination offset when fetching fresh
+        self.current_offset.set(0);
+
         let url = format!("{}/collections/{}/get", self.base_url, self.collection_id);
 
         let request = ChromaGetRequest {
@@ -193,22 +229,28 @@ impl DatabaseSource for ChromaDbSource {
             .json()
             .map_err(|e| DbError::Query(format!("Failed to parse response: {}", e)))?;
 
-        let mut records = self.response_to_records(response);
+        let records = self.response_to_records(response);
 
-        // Sort by timestamp (descending) if available
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        // Update offset for next pagination call
+        self.current_offset.set(records.len());
 
         Ok(records)
     }
 
     fn fetch_before(&self, _before: &str, limit: usize) -> Result<Vec<Record>, DbError> {
-        // ChromaDB doesn't support timestamp-based pagination natively
-        // For now, just fetch with offset (this is a limitation)
+        // ChromaDB uses offset-based pagination
+        let current = self.current_offset.get();
+
+        // Don't fetch if we've reached the end
+        if current >= self.info.record_count {
+            return Ok(Vec::new());
+        }
+
         let url = format!("{}/collections/{}/get", self.base_url, self.collection_id);
 
         let request = ChromaGetRequest {
             limit: Some(limit),
-            offset: Some(limit), // Use limit as offset for simplicity
+            offset: Some(current),
             include: vec!["documents".to_string(), "metadatas".to_string()],
         };
 
@@ -220,86 +262,21 @@ impl DatabaseSource for ChromaDbSource {
             .json()
             .map_err(|e| DbError::Query(format!("Failed to parse response: {}", e)))?;
 
-        let mut records = self.response_to_records(response);
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        let records = self.response_to_records(response);
+
+        // Update offset for next call
+        self.current_offset.set(current + records.len());
 
         Ok(records)
     }
 
-    fn execute_query(&self, query: &str) -> Result<Vec<Record>, DbError> {
-        // Treat the query as a semantic search query
-        let url = format!("{}/collections/{}/query", self.base_url, self.collection_id);
-
-        let request = ChromaQueryRequest {
-            query_texts: vec![query.to_string()],
-            n_results: 20,
-            include: vec![
-                "documents".to_string(),
-                "metadatas".to_string(),
-                "distances".to_string(),
-            ],
-        };
-
-        let response: ChromaQueryResponse = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()?
-            .json()
-            .map_err(|e| DbError::Query(format!("Failed to parse response: {}", e)))?;
-
-        // Flatten the nested response (query returns nested arrays)
-        let mut records = Vec::new();
-
-        if let Some(ids) = response.ids.first() {
-            let documents = response.documents.and_then(|d| d.into_iter().next());
-            let metadatas = response.metadatas.and_then(|m| m.into_iter().next());
-            let distances = response.distances.and_then(|d| d.into_iter().next());
-
-            for (i, id) in ids.iter().enumerate() {
-                let mut record = Record::new();
-                record.fields.insert("id".to_string(), id.clone());
-
-                // Add distance
-                if let Some(ref dists) = distances {
-                    if let Some(dist) = dists.get(i) {
-                        record
-                            .fields
-                            .insert("distance".to_string(), format!("{:.4}", dist));
-                    }
-                }
-
-                // Add document
-                if let Some(ref docs) = documents {
-                    if let Some(Some(doc)) = docs.get(i) {
-                        let truncated: String = doc.chars().take(150).collect();
-                        record
-                            .fields
-                            .insert("document".to_string(), truncated + "...");
-                    }
-                }
-
-                // Add metadata
-                if let Some(ref metas) = metadatas {
-                    if let Some(Some(meta)) = metas.get(i) {
-                        for (key, value) in meta {
-                            let str_value = match value {
-                                serde_json::Value::String(s) => s.clone(),
-                                serde_json::Value::Number(n) => n.to_string(),
-                                serde_json::Value::Bool(b) => b.to_string(),
-                                serde_json::Value::Null => "null".to_string(),
-                                _ => value.to_string(),
-                            };
-                            record.fields.insert(key.clone(), str_value);
-                        }
-                    }
-                }
-
-                records.push(record);
-            }
-        }
-
-        Ok(records)
+    fn execute_query(&self, _query: &str) -> Result<Vec<Record>, DbError> {
+        // Note: ChromaDB v2 API requires actual embeddings for semantic search.
+        // For now, just fetch recent documents. A future enhancement could add
+        // local embedding generation using rust-bert or candle.
+        //
+        // TODO: Add local embedding model for semantic search support
+        self.fetch_recent(50)
     }
 
     fn refresh_count(&mut self) -> Result<usize, DbError> {

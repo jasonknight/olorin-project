@@ -37,11 +37,11 @@
       "port": 8000,
       "collection": "documents"
     },
-    "embedding_model": "all-MiniLM-L6-v2",
+    "embedding_model": "nomic-ai/nomic-embed-text-v1.5",
     "chunking": {
-      "size": 1000,
-      "overlap": 200,
-      "min_size": 100
+      "size": 4000,
+      "overlap": 400,
+      "min_size": 200
     },
     "poll_interval": 5,
     "tracking_db": "./hippocampus/data/tracking.db",
@@ -64,7 +64,7 @@
     "decision_temperature": 0.1,
     "chromadb_query_n_results": 10,
     "context_db_path": "./hippocampus/data/context.db",
-    "cleanup_context_after_use": true
+    "cleanup_context_after_use": false
   },
   "chat": {
     "history_enabled": true,

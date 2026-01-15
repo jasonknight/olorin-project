@@ -1,6 +1,7 @@
 //! Chat history database monitoring
 
 use anyhow::Result;
+use chrono::{DateTime, Local};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,6 +12,16 @@ use crate::message::ChatMessage;
 pub struct ChatDb {
     path: PathBuf,
     seen_ids: HashSet<String>,
+    /// Last time we checked for updates (for detecting streaming updates)
+    last_check_time: Option<DateTime<Local>>,
+}
+
+/// Result of checking for messages - separates new vs updated
+pub struct MessageCheckResult {
+    /// Completely new messages (never seen before)
+    pub new_messages: Vec<ChatMessage>,
+    /// Messages that existed but have been updated (streaming)
+    pub updated_messages: Vec<ChatMessage>,
 }
 
 impl ChatDb {
@@ -18,6 +29,7 @@ impl ChatDb {
         Self {
             path,
             seen_ids: HashSet::new(),
+            last_check_time: None,
         }
     }
 
@@ -36,7 +48,8 @@ impl ChatDb {
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT m.id, m.role, m.content, m.created_at
+            SELECT m.id, m.role, m.content, m.created_at,
+                   m.message_type, m.metadata, m.updated_at
             FROM messages m
             JOIN conversations c ON m.conversation_id = c.id
             WHERE c.is_active = 1
@@ -51,6 +64,9 @@ impl ChatDb {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             })?
             .filter_map(|r| r.ok())
@@ -61,25 +77,40 @@ impl ChatDb {
             self.seen_ids.insert(msg.id.clone());
         }
 
+        // Set the last check time to now for subsequent update detection
+        self.last_check_time = Some(Local::now());
+
         Ok(messages)
     }
 
-    /// Get new messages since last check
-    pub fn get_new_messages(&mut self) -> Result<Vec<ChatMessage>> {
+    /// Get new and updated messages since last check
+    ///
+    /// Returns a MessageCheckResult with:
+    /// - new_messages: Messages with IDs we haven't seen before
+    /// - updated_messages: Messages we've seen but whose updated_at is newer than our last check
+    pub fn get_new_and_updated_messages(&mut self) -> Result<MessageCheckResult> {
         if !self.exists() {
-            return Ok(Vec::new());
+            return Ok(MessageCheckResult {
+                new_messages: Vec::new(),
+                updated_messages: Vec::new(),
+            });
         }
 
-        // If we haven't loaded yet, get all messages
+        // If we haven't loaded yet, get all messages as "new"
         if self.seen_ids.is_empty() {
-            return self.get_all_messages();
+            let messages = self.get_all_messages()?;
+            return Ok(MessageCheckResult {
+                new_messages: messages,
+                updated_messages: Vec::new(),
+            });
         }
 
         let conn = Connection::open(&self.path)?;
 
         let mut stmt = conn.prepare(
             r#"
-            SELECT m.id, m.role, m.content, m.created_at
+            SELECT m.id, m.role, m.content, m.created_at,
+                   m.message_type, m.metadata, m.updated_at
             FROM messages m
             JOIN conversations c ON m.conversation_id = c.id
             WHERE c.is_active = 1
@@ -94,23 +125,38 @@ impl ChatDb {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             })?
             .filter_map(|r| r.ok())
             .collect();
 
-        // Filter to only new messages (not in seen_ids)
-        let new_messages: Vec<ChatMessage> = all_messages
-            .into_iter()
-            .filter(|msg| !self.seen_ids.contains(&msg.id))
-            .collect();
+        let last_check = self.last_check_time;
+        let mut new_messages = Vec::new();
+        let mut updated_messages = Vec::new();
 
-        // Track new message IDs
-        for msg in &new_messages {
-            self.seen_ids.insert(msg.id.clone());
+        for msg in all_messages {
+            if !self.seen_ids.contains(&msg.id) {
+                // Completely new message
+                self.seen_ids.insert(msg.id.clone());
+                new_messages.push(msg);
+            } else if let (Some(last_check_time), Some(updated_at)) = (last_check, msg.updated_at) {
+                // Already seen, but check if it was updated since our last check
+                if updated_at > last_check_time {
+                    updated_messages.push(msg);
+                }
+            }
         }
 
-        Ok(new_messages)
+        // Update last check time for next iteration
+        self.last_check_time = Some(Local::now());
+
+        Ok(MessageCheckResult {
+            new_messages,
+            updated_messages,
+        })
     }
 
     /// Get statistics about the chat database

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::traits::{DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record};
+use super::traits::{ConnectionState, DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record};
 
 /// SQLite database source for file tracking databases (processed_files schema)
 pub struct SqliteFileTracker {
@@ -48,6 +48,7 @@ impl SqliteFileTracker {
                 record_count: count,
                 columns,
                 table_name: "processed_files".to_string(),
+                connection_state: ConnectionState::Connected,
             },
             conn,
         })
@@ -83,6 +84,25 @@ impl SqliteFileTracker {
 impl DatabaseSource for SqliteFileTracker {
     fn info(&self) -> &DatabaseInfo {
         &self.info
+    }
+
+    fn info_mut(&mut self) -> &mut DatabaseInfo {
+        &mut self.info
+    }
+
+    fn health_check(&mut self) -> bool {
+        // SQLite files are always available if they exist and can be queried
+        match self.conn.query_row("SELECT 1", [], |_| Ok(())) {
+            Ok(_) => {
+                self.info.connection_state = ConnectionState::Connected;
+                true
+            }
+            Err(e) => {
+                self.info.connection_state =
+                    ConnectionState::Disconnected(format!("SQLite error: {}", e));
+                false
+            }
+        }
     }
 
     fn fetch_recent(&self, limit: usize) -> Result<Vec<Record>, DbError> {
@@ -224,6 +244,7 @@ impl SqliteContext {
                 record_count: count,
                 columns,
                 table_name: "contexts".to_string(),
+                connection_state: ConnectionState::Connected,
             },
             conn,
         })
@@ -278,6 +299,24 @@ impl SqliteContext {
 impl DatabaseSource for SqliteContext {
     fn info(&self) -> &DatabaseInfo {
         &self.info
+    }
+
+    fn info_mut(&mut self) -> &mut DatabaseInfo {
+        &mut self.info
+    }
+
+    fn health_check(&mut self) -> bool {
+        match self.conn.query_row("SELECT 1", [], |_| Ok(())) {
+            Ok(_) => {
+                self.info.connection_state = ConnectionState::Connected;
+                true
+            }
+            Err(e) => {
+                self.info.connection_state =
+                    ConnectionState::Disconnected(format!("SQLite error: {}", e));
+                false
+            }
+        }
     }
 
     fn fetch_recent(&self, limit: usize) -> Result<Vec<Record>, DbError> {
@@ -418,6 +457,7 @@ impl SqliteChat {
                 record_count: count,
                 columns,
                 table_name: "messages".to_string(),
+                connection_state: ConnectionState::Connected,
             },
             conn,
         })
@@ -456,6 +496,24 @@ impl SqliteChat {
 impl DatabaseSource for SqliteChat {
     fn info(&self) -> &DatabaseInfo {
         &self.info
+    }
+
+    fn info_mut(&mut self) -> &mut DatabaseInfo {
+        &mut self.info
+    }
+
+    fn health_check(&mut self) -> bool {
+        match self.conn.query_row("SELECT 1", [], |_| Ok(())) {
+            Ok(_) => {
+                self.info.connection_state = ConnectionState::Connected;
+                true
+            }
+            Err(e) => {
+                self.info.connection_state =
+                    ConnectionState::Disconnected(format!("SQLite error: {}", e));
+                false
+            }
+        }
     }
 
     fn fetch_recent(&self, limit: usize) -> Result<Vec<Record>, DbError> {

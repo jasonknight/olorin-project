@@ -3,9 +3,20 @@
 use anyhow::Result;
 
 use crate::db::{
-    ChromaDbSource, DatabaseInfo, DatabaseSource, DbError, Record, SqliteChat, SqliteContext,
-    SqliteFileTracker,
+    ChromaDbSource, DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record, SqliteChat,
+    SqliteContext, SqliteFileTracker,
 };
+
+/// Configuration for a failed ChromaDB connection (for retry)
+#[derive(Debug, Clone)]
+pub struct FailedChromaDbConfig {
+    pub host: String,
+    pub port: u16,
+    pub collection: String,
+}
+
+/// How often to check ChromaDB health (in ticks)
+const HEALTH_CHECK_INTERVAL: u64 = 30; // ~7.5 seconds at 250ms tick rate
 
 /// Maximum number of records to keep in memory
 const MAX_RECORDS_IN_MEMORY: usize = 500;
@@ -29,6 +40,15 @@ pub enum FocusedPanel {
 pub struct ClearDbModal {
     /// Which button is selected (true = Yes, false = No)
     pub yes_selected: bool,
+}
+
+/// Modal dialog state for viewing record details
+#[derive(Debug, Clone)]
+pub struct RecordDetailModal {
+    /// The record being displayed
+    pub record: Record,
+    /// Current scroll position within the modal
+    pub scroll: usize,
 }
 
 impl FocusedPanel {
@@ -73,11 +93,20 @@ pub struct App {
     /// Clear database confirmation modal (None = hidden)
     pub clear_modal: Option<ClearDbModal>,
 
+    /// Record detail modal (None = hidden)
+    pub detail_modal: Option<RecordDetailModal>,
+
     /// Configuration
     pub config: olorin_config::Config,
 
     /// Error messages from database loading
     pub load_errors: Vec<String>,
+
+    /// Failed ChromaDB configuration (for retry)
+    pub failed_chromadb: Option<FailedChromaDbConfig>,
+
+    /// Tick counter for periodic health checks
+    tick_count: u64,
 }
 
 impl App {
@@ -96,15 +125,22 @@ impl App {
             should_quit: false,
             status_message: Some("Loading databases...".to_string()),
             clear_modal: None,
+            detail_modal: None,
             config,
             load_errors: Vec::new(),
+            failed_chromadb: None,
+            tick_count: 0,
         };
 
         app.load_databases();
 
         if !app.databases.is_empty() {
             app.refresh_records();
-            app.status_message = Some(format!("Loaded {} databases", app.databases.len()));
+            let mut msg = format!("Loaded {} databases", app.databases.len());
+            if app.failed_chromadb.is_some() {
+                msg.push_str(" (ChromaDB offline - press R to retry)");
+            }
+            app.status_message = Some(msg);
         } else if !app.load_errors.is_empty() {
             app.status_message = Some(format!("Errors: {}", app.load_errors.join("; ")));
         } else {
@@ -173,10 +209,19 @@ impl App {
             .unwrap_or_else(|| "documents".to_string());
 
         match ChromaDbSource::new(&chromadb_host, chromadb_port, &collection) {
-            Ok(db) => self.databases.push(Box::new(db)),
+            Ok(db) => {
+                self.databases.push(Box::new(db));
+                self.failed_chromadb = None; // Clear any previous failure
+            }
             Err(DbError::Connection(e)) => {
+                // Store config for retry
+                self.failed_chromadb = Some(FailedChromaDbConfig {
+                    host: chromadb_host,
+                    port: chromadb_port,
+                    collection,
+                });
                 self.load_errors
-                    .push(format!("ChromaDB: {} (is it running?)", e));
+                    .push(format!("ChromaDB: {} (press R to retry)", e));
             }
             Err(e) => {
                 self.load_errors.push(format!("ChromaDB: {}", e));
@@ -416,5 +461,142 @@ impl App {
             }
         }
         self.hide_clear_modal();
+    }
+
+    /// Handle periodic tick events
+    pub fn on_tick(&mut self) {
+        self.tick_count += 1;
+
+        // Check for config hot-reload
+        self.check_config_reload();
+
+        // Periodic health check for network-based databases
+        if self.tick_count % HEALTH_CHECK_INTERVAL == 0 {
+            self.check_database_health();
+        }
+    }
+
+    /// Check health of network-based databases (ChromaDB)
+    fn check_database_health(&mut self) {
+        for db in &mut self.databases {
+            if db.info().db_type == DatabaseType::ChromaDB {
+                let was_connected = db.info().connection_state.is_available();
+                let is_connected = db.health_check();
+
+                // Notify on state change
+                if was_connected && !is_connected {
+                    self.status_message = Some(format!(
+                        "{} went offline",
+                        db.info().name
+                    ));
+                } else if !was_connected && is_connected {
+                    self.status_message = Some(format!(
+                        "{} reconnected",
+                        db.info().name
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Retry connecting to ChromaDB if it failed at startup
+    pub fn retry_chromadb_connection(&mut self) {
+        // First, check if we have a failed config to retry
+        let config = match self.failed_chromadb.take() {
+            Some(c) => c,
+            None => {
+                // Check if we already have ChromaDB in the list and it's disconnected
+                let chromadb_idx = self.databases.iter().position(|db| {
+                    db.info().db_type == DatabaseType::ChromaDB
+                });
+
+                if let Some(idx) = chromadb_idx {
+                    // Health check the existing ChromaDB
+                    if self.databases[idx].health_check() {
+                        self.status_message = Some("ChromaDB is already connected".to_string());
+                    } else {
+                        self.status_message = Some(format!(
+                            "ChromaDB still offline: {}",
+                            self.databases[idx]
+                                .info()
+                                .connection_state
+                                .error_message()
+                                .unwrap_or("unknown error")
+                        ));
+                    }
+                } else {
+                    self.status_message = Some("No ChromaDB to retry".to_string());
+                }
+                return;
+            }
+        };
+
+        self.status_message = Some("Retrying ChromaDB connection...".to_string());
+
+        match ChromaDbSource::new(&config.host, config.port, &config.collection) {
+            Ok(db) => {
+                self.databases.push(Box::new(db));
+                // Remove the error from load_errors
+                self.load_errors.retain(|e| !e.contains("ChromaDB"));
+                self.status_message = Some(format!(
+                    "ChromaDB connected! ({} databases total)",
+                    self.databases.len()
+                ));
+            }
+            Err(DbError::Connection(e)) => {
+                // Put the config back for another retry
+                self.failed_chromadb = Some(config);
+                self.status_message = Some(format!("ChromaDB still offline: {}", e));
+            }
+            Err(e) => {
+                self.status_message = Some(format!("ChromaDB error: {}", e));
+            }
+        }
+    }
+
+    /// Check if there's a failed ChromaDB that can be retried
+    #[allow(dead_code)]
+    pub fn has_failed_chromadb(&self) -> bool {
+        self.failed_chromadb.is_some()
+    }
+
+    /// Show the record detail modal for the currently selected record
+    pub fn show_detail_modal(&mut self) {
+        if let Some(record) = self.records.get(self.record_scroll).cloned() {
+            self.detail_modal = Some(RecordDetailModal { record, scroll: 0 });
+        }
+    }
+
+    /// Hide the record detail modal
+    pub fn hide_detail_modal(&mut self) {
+        self.detail_modal = None;
+    }
+
+    /// Scroll up in the detail modal
+    pub fn detail_modal_scroll_up(&mut self) {
+        if let Some(ref mut modal) = self.detail_modal {
+            modal.scroll = modal.scroll.saturating_sub(1);
+        }
+    }
+
+    /// Scroll down in the detail modal
+    pub fn detail_modal_scroll_down(&mut self) {
+        if let Some(ref mut modal) = self.detail_modal {
+            modal.scroll += 1;
+        }
+    }
+
+    /// Page up in the detail modal
+    pub fn detail_modal_page_up(&mut self) {
+        if let Some(ref mut modal) = self.detail_modal {
+            modal.scroll = modal.scroll.saturating_sub(10);
+        }
+    }
+
+    /// Page down in the detail modal
+    pub fn detail_modal_page_down(&mut self) {
+        if let Some(ref mut modal) = self.detail_modal {
+            modal.scroll += 10;
+        }
     }
 }
