@@ -81,11 +81,6 @@
     ]
   },
   "control": {
-    "input_topic": "control_in",
-    "output_topic": "control_out",
-    "consumer_group": "control-controller-group",
-    "handler_timeout_seconds": 30,
-    "callback_pool_size": 4,
     "api": {
       "enabled": true,
       "port": 8765,
