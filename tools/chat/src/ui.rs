@@ -453,6 +453,8 @@ fn parse_inline_markdown(
 
 /// Render the input text area with visual soft-wrapping
 fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
+    use ratatui::widgets::Wrap;
+
     let block = Block::default()
         .title(" Input ")
         .borders(Borders::ALL)
@@ -461,108 +463,60 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Get text and cursor from tui-textarea
+    let lines = app.input.lines();
+    let (cursor_row, cursor_col) = app.input.cursor();
+    let text = lines.join("\n");
+
+    let text_style = Style::default().fg(Color::White);
+
+    // Use Paragraph with word wrapping
+    let paragraph = Paragraph::new(text.clone())
+        .style(text_style)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, inner);
+
+    // Calculate cursor position in wrapped text
+    // We need to figure out where the cursor lands after wrapping
     let wrap_width = inner.width as usize;
     if wrap_width == 0 {
         return;
     }
 
-    // Get the logical cursor position and text from tui-textarea
-    let (cursor_row, cursor_col) = app.input.cursor();
-    let lines = app.input.lines();
+    // Calculate visual cursor position
+    let mut visual_row: u16 = 0;
+    let mut visual_col: u16 = 0;
 
-    // Build visually wrapped lines and track cursor mapping
-    let mut visual_lines: Vec<Line<'static>> = Vec::new();
-    let mut cursor_visual_row: usize = 0;
-    let mut cursor_visual_col: usize = 0;
-    let mut found_cursor = false;
-
-    let text_style = Style::default().fg(Color::White);
-
-    for (logical_row, logical_line) in lines.iter().enumerate() {
-        let is_cursor_row = logical_row == cursor_row;
-
-        if logical_line.is_empty() {
-            // Empty line - just add a blank visual line
-            if is_cursor_row {
-                cursor_visual_row = visual_lines.len();
-                cursor_visual_col = 0;
-                found_cursor = true;
+    for (line_idx, line) in lines.iter().enumerate() {
+        if line_idx < cursor_row {
+            // Count how many visual rows this line takes
+            if line.is_empty() {
+                visual_row += 1;
+            } else {
+                let wrapped_count = (line.len() + wrap_width - 1) / wrap_width;
+                visual_row += wrapped_count.max(1) as u16;
             }
-            visual_lines.push(Line::from(""));
         } else {
-            // Wrap this logical line into multiple visual lines
-            let wrapped = textwrap::wrap(logical_line, wrap_width.max(1));
-
-            if is_cursor_row {
-                // Find which visual line the cursor is on
-                let mut char_offset = 0;
-                for (wrap_idx, wrapped_line) in wrapped.iter().enumerate() {
-                    let line_len = wrapped_line.len();
-                    // Account for the space that gets consumed at wrap points
-                    let effective_end = if wrap_idx < wrapped.len() - 1 {
-                        char_offset + line_len + 1 // +1 for the space/break point
-                    } else {
-                        char_offset + line_len
-                    };
-
-                    if cursor_col <= effective_end || wrap_idx == wrapped.len() - 1 {
-                        cursor_visual_row = visual_lines.len() + wrap_idx;
-                        cursor_visual_col = cursor_col.saturating_sub(char_offset);
-                        // Clamp to line length
-                        cursor_visual_col = cursor_visual_col.min(wrapped_line.len());
-                        found_cursor = true;
-                        break;
-                    }
-                    char_offset = effective_end;
-                }
+            // This is the cursor line - find column position
+            if cursor_col == 0 {
+                visual_col = 0;
+            } else {
+                // Simple calculation: which wrapped line and column
+                let extra_rows = cursor_col / wrap_width;
+                visual_row += extra_rows as u16;
+                visual_col = (cursor_col % wrap_width) as u16;
             }
-
-            for wrapped_line in wrapped {
-                visual_lines.push(Line::from(Span::styled(
-                    wrapped_line.to_string(),
-                    text_style,
-                )));
-            }
+            break;
         }
     }
 
-    // Handle empty input (show placeholder behavior)
-    if visual_lines.is_empty() {
-        cursor_visual_row = 0;
-        cursor_visual_col = 0;
-        found_cursor = true;
-        visual_lines.push(Line::from(""));
-    }
-
-    // Calculate scroll offset if content exceeds visible area
-    let visible_height = inner.height as usize;
-
-    // Scroll to keep cursor visible
-    let scroll_offset = if found_cursor && cursor_visual_row >= visible_height {
-        cursor_visual_row.saturating_sub(visible_height - 1)
-    } else {
-        0
-    };
-
-    // Get visible portion
-    let visible_lines: Vec<Line> = visual_lines
-        .into_iter()
-        .skip(scroll_offset)
-        .take(visible_height)
-        .collect();
-
-    let paragraph = Paragraph::new(Text::from(visible_lines));
-    frame.render_widget(paragraph, inner);
-
-    // Position the terminal cursor (blinking cursor in the input area)
-    if found_cursor {
-        let visual_row_in_view = cursor_visual_row.saturating_sub(scroll_offset);
-        if visual_row_in_view < visible_height {
-            frame.set_cursor_position((
-                inner.x + cursor_visual_col as u16,
-                inner.y + visual_row_in_view as u16,
-            ));
-        }
+    // Position cursor (clamped to visible area)
+    let visible_height = inner.height;
+    if visual_row < visible_height {
+        let cursor_x = inner.x.saturating_add(visual_col).min(inner.x + inner.width - 1);
+        let cursor_y = inner.y.saturating_add(visual_row);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
