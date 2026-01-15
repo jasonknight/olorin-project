@@ -74,6 +74,15 @@ _KEY_TO_PATH = {
     "CHAT_RESET_PATTERNS": "chat.reset_patterns",
     # State
     "STATE_DB_PATH": "state.db_path",
+    # Control
+    "CONTROL_INPUT_TOPIC": "control.input_topic",
+    "CONTROL_OUTPUT_TOPIC": "control.output_topic",
+    "CONTROL_CONSUMER_GROUP": "control.consumer_group",
+    "CONTROL_HANDLER_TIMEOUT": "control.handler_timeout_seconds",
+    "CONTROL_CALLBACK_POOL_SIZE": "control.callback_pool_size",
+    "CONTROL_API_ENABLED": "control.api.enabled",
+    "CONTROL_API_PORT": "control.api.port",
+    "CONTROL_API_HOST": "control.api.host",
 }
 
 

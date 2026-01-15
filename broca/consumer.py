@@ -2,6 +2,7 @@
 from kafka import KafkaConsumer
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 
@@ -9,6 +10,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 from libs.olorin_logging import OlorinLogger
+from libs.state import get_state
 
 from TTS.api import TTS
 
@@ -72,6 +74,10 @@ class TTSConsumer:
         # Track last message to detect duplicates
         self.last_message_text = None
         self.is_playing = False
+        self._audio_process = None
+
+        # Initialize state for cross-component communication
+        self.state = get_state()
 
         self.consumer = KafkaConsumer(
             config.topic,
@@ -156,8 +162,9 @@ class TTSConsumer:
 
             logger.info(f"Processing message {message_id}: {text[:50]}...")
 
-            # Set playing state
+            # Set playing state (both local and in shared state)
             self.is_playing = True
+            self.state.set_bool("broca.is_playing", True)
 
             # Generate speech
             output_path = f"{self.config.output_dir}/{message_id}.wav"
@@ -172,21 +179,41 @@ class TTSConsumer:
 
             logger.info(f"Speech generated: {output_path}")
 
-            # Play the audio
+            # Play the audio using subprocess to track PID
             logger.info("Playing audio...")
-            os.system(f"afplay {output_path}")
+            self._audio_process = subprocess.Popen(
+                ["afplay", output_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # Store PID in state for cross-component control
+            self.state.set_int("broca.audio_pid", self._audio_process.pid)
+            logger.info(f"Audio playback started (PID: {self._audio_process.pid})")
+
+            # Wait for playback to complete
+            self._audio_process.wait()
+            logger.info("Audio playback completed")
+
+            # Clear audio state
+            self._audio_process = None
+            self.state.delete("broca.audio_pid")
 
             # Delete the file after playing
             os.remove(output_path)
-            logger.info(f"Audio played and file deleted: {output_path}")
+            logger.info(f"Audio file deleted: {output_path}")
 
             # Update last message and playing state
             self.last_message_text = text
             self.is_playing = False
+            self.state.set_bool("broca.is_playing", False)
 
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             self.is_playing = False
+            self.state.set_bool("broca.is_playing", False)
+            self._audio_process = None
+            self.state.delete("broca.audio_pid")
 
     def start(self):
         """Start consuming messages"""

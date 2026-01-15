@@ -190,6 +190,9 @@ echo -e "\n${GREEN}=== Starting Consumer Scripts ===${NC}"
 # Start Cortex consumer
 start_daemon "cortex-consumer" "cortex" "consumer.py" "true"
 
+# Start Cortex controller (control command handler)
+start_daemon "cortex-controller" "cortex" "controller.py" "true"
+
 # Start Broca consumer
 start_daemon "broca-consumer" "broca" "consumer.py" "true"
 
