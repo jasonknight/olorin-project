@@ -17,6 +17,7 @@ from libs.config import Config
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
 from libs.chat_store import ChatStore
+from libs.state import get_state
 
 # Initialize config with hot-reload support
 config = Config(watch=True)
@@ -332,6 +333,12 @@ class ExoConsumer:
         self.shutdown_event = threading.Event()
         logger.info("Thread pool executor initialized with 3 workers")
 
+        # Tool call support detection
+        self._tools_supported: bool | None = None  # None = not yet detected
+        self._state = (
+            get_state()
+        )  # Singleton state manager for cross-component visibility
+
         logger.info("ExoConsumer initialized successfully")
         logger.info(f"  Input topic: {config.kafka_input_topic}")
         logger.info(f"  Output topic: {config.kafka_output_topic}")
@@ -344,6 +351,132 @@ class ExoConsumer:
         client = OpenAI(base_url=config.exo_base_url, api_key=config.exo_api_key)
         logger.info("OpenAI client initialized successfully")
         return client
+
+    def _detect_tool_call_support(self) -> bool:
+        """
+        Detect if the current model and API endpoint support tool calls.
+
+        Uses a minimal test call with a dummy tool definition to probe support.
+        This is necessary because:
+        1. Exo does not expose tool capabilities via /models or /state endpoints
+        2. OpenAI-compatible APIs vary in tool support by model and implementation
+
+        Returns:
+            bool: True if tool calls are supported, False otherwise
+        """
+        thread_name = threading.current_thread().name
+        logger.info(f"[{thread_name}] Detecting tool call support...")
+
+        try:
+            # Get the model to test with
+            model_to_use = self.config.model_name
+            if not model_to_use:
+                model_to_use = self._get_running_model()
+                if not model_to_use:
+                    logger.warning(
+                        f"[{thread_name}] No model available for tool detection"
+                    )
+                    return False
+
+            # Define a minimal dummy tool for testing
+            test_tool = {
+                "type": "function",
+                "function": {
+                    "name": "test_tool_support",
+                    "description": "A test function to detect tool support",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "test": {"type": "string", "description": "Test parameter"}
+                        },
+                        "required": [],
+                    },
+                },
+            }
+
+            # Make a minimal test call - we don't need a real response
+            # Just checking if the API accepts tools parameter
+            self.client.chat.completions.create(
+                model=model_to_use,
+                messages=[{"role": "user", "content": "test"}],
+                tools=[test_tool],
+                max_tokens=1,  # Minimize token usage
+                timeout=10,  # Quick timeout for detection
+            )
+
+            # If we get here without error, tools are supported
+            logger.info(
+                f"[{thread_name}] Tool call support DETECTED for model {model_to_use}"
+            )
+            return True
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Check for specific error messages that indicate tools not supported
+            if any(
+                indicator in error_msg
+                for indicator in [
+                    "tools",
+                    "function",
+                    "not supported",
+                    "invalid",
+                    "unknown parameter",
+                ]
+            ):
+                logger.info(f"[{thread_name}] Tool calls NOT supported: {e}")
+            else:
+                logger.warning(
+                    f"[{thread_name}] Tool detection failed with unexpected error: {e}"
+                )
+            return False
+
+    def check_tool_support(self, force_redetect: bool = False) -> bool:
+        """
+        Check if tool calls are supported by the current model/endpoint.
+
+        Results are cached in memory and persisted to state.db for visibility
+        in the olorin-inspector and other components.
+
+        Args:
+            force_redetect: If True, bypass cache and re-run detection
+
+        Returns:
+            bool: True if tool calls are supported
+        """
+        thread_name = threading.current_thread().name
+
+        # Return cached result if available and not forcing redetection
+        if self._tools_supported is not None and not force_redetect:
+            logger.debug(
+                f"[{thread_name}] Using cached tool support: {self._tools_supported}"
+            )
+            return self._tools_supported
+
+        # Perform detection
+        self._tools_supported = self._detect_tool_call_support()
+
+        # Store result in state.db for cross-component visibility
+        try:
+            model_name = (
+                self.config.model_name or self._get_running_model() or "unknown"
+            )
+            self._state.set_bool("cortex.tools_supported", self._tools_supported)
+            self._state.set_string("cortex.tools_model", model_name)
+            self._state.set_string(
+                "cortex.tools_checked_at", datetime.now().isoformat()
+            )
+
+            logger.info(f"[{thread_name}] Stored tool support status in state.db:")
+            logger.info(
+                f"[{thread_name}]   cortex.tools_supported = {self._tools_supported}"
+            )
+            logger.info(f"[{thread_name}]   cortex.tools_model = {model_name}")
+        except Exception as e:
+            logger.warning(
+                f"[{thread_name}] Failed to store tool support in state.db: {e}"
+            )
+
+        return self._tools_supported
 
     def _init_context_store(self):
         """Initialize context store for reading enriched contexts from hippocampus"""
@@ -847,6 +980,16 @@ User's question: {prompt}"""
                     self.config.max_tokens if self.config.max_tokens else "exo default"
                 )
                 logger.info(f"Max tokens changed: {old_tokens} -> {new_tokens}")
+
+            # Re-detect tool support when endpoint or model changes
+            if (
+                self.config.exo_base_url != old_exo_base_url
+                or self.config.exo_api_key != old_exo_api_key
+                or self.config.model_name != old_model_name
+            ):
+                logger.info("Re-detecting tool support after endpoint/model change...")
+                self._tools_supported = None  # Clear cache
+                self.check_tool_support(force_redetect=True)
 
             logger.info("Configuration reloaded successfully")
         else:
@@ -1471,6 +1614,12 @@ User's question: {prompt}"""
         logger.info(f"Bootstrap servers: {self.config.kafka_bootstrap_servers}")
         logger.info("Using threaded message processing to prevent Kafka rebalancing")
         logger.info("Waiting for prompts...")
+        logger.info("=" * 60)
+
+        # Detect tool call support at startup
+        logger.info("Checking tool call support...")
+        tools_supported = self.check_tool_support()
+        logger.info(f"Tool call support: {'YES' if tools_supported else 'NO'}")
         logger.info("=" * 60)
 
         message_count = 0
