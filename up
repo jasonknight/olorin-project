@@ -3,6 +3,9 @@
 
 set -e
 
+# Get the directory where this script lives (project root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -12,6 +15,47 @@ NC='\033[0m' # No Color
 # Create directories for PIDs and logs
 mkdir -p .pids
 mkdir -p logs
+mkdir -p data
+
+# Function to update state database
+update_state() {
+    local key=$1
+    local value=$2
+    local value_type=${3:-"int"}  # default to int
+
+    cd "$SCRIPT_DIR"
+    if [ "$value_type" = "int" ]; then
+        python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.set_int('$key', $value)
+" 2>/dev/null || true
+    elif [ "$value_type" = "string" ]; then
+        python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.set_string('$key', '$value')
+" 2>/dev/null || true
+    elif [ "$value_type" = "bool" ]; then
+        python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.set_bool('$key', $value)
+" 2>/dev/null || true
+    fi
+}
+
+# Function to set state to running
+set_system_running() {
+    update_state "system.running" "True" "bool"
+    update_state "system.started_at" "$(date -u +%Y-%m-%dT%H:%M:%S)" "string"
+}
 
 echo -e "${GREEN}Starting olorin-project infrastructure...${NC}"
 
@@ -71,6 +115,10 @@ start_daemon() {
     echo -e "${GREEN}Started $name (PID: $pid)${NC}"
 
     cd - > /dev/null
+
+    # Update state database with PID
+    update_state "system.pids.${name}" "$pid" "int"
+    update_state "${name}.status" "running" "string"
 }
 
 # 1. Start Broca (Kafka)
@@ -106,6 +154,10 @@ cd ..
 wait_for_container "kafkaserver"
 sleep 5  # Give Kafka extra time to initialize
 
+# Update state with Kafka container info
+update_state "containers.kafkaserver.status" "running" "string"
+update_state "containers.kafkaserver.port" "9092" "int"
+
 # 2. Start Hippocampus (ChromaDB)
 echo -e "\n${GREEN}=== Starting Hippocampus (ChromaDB) ===${NC}"
 cd hippocampus
@@ -124,6 +176,10 @@ podman run \
 cd ..
 wait_for_container "chromadb"
 sleep 2  # Give ChromaDB time to initialize
+
+# Update state with ChromaDB container info
+update_state "containers.chromadb.status" "running" "string"
+update_state "containers.chromadb.port" "8000" "int"
 
 # 3. Start Exo (AI inference)
 echo -e "\n${GREEN}=== Starting Exo (AI Inference) ===${NC}"
@@ -154,6 +210,9 @@ start_daemon "hippocampus-ingest" "hippocampus" "ingest.py" "true"
 
 # Start Hippocampus enrichener (prompt enrichment with ChromaDB context)
 start_daemon "hippocampus-enrichener" "hippocampus" "enrichener.py" "true"
+
+# Update system state
+set_system_running
 
 # Summary
 echo -e "\n${GREEN}========================================${NC}"

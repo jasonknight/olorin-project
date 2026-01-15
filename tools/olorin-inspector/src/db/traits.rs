@@ -84,6 +84,8 @@ pub enum DatabaseType {
     SqliteContext,
     /// SQLite database with conversations and messages tables
     SqliteChat,
+    /// SQLite database with state key-value store
+    SqliteState,
     /// ChromaDB HTTP API
     ChromaDB,
 }
@@ -94,6 +96,7 @@ impl DatabaseType {
             DatabaseType::SqliteFileTracker => "SQLite (File Tracker)",
             DatabaseType::SqliteContext => "SQLite (Context)",
             DatabaseType::SqliteChat => "SQLite (Chat)",
+            DatabaseType::SqliteState => "SQLite (State)",
             DatabaseType::ChromaDB => "ChromaDB",
         }
     }

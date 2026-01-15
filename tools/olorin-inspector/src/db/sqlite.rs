@@ -641,3 +641,220 @@ impl DatabaseSource for SqliteChat {
         Ok(count)
     }
 }
+
+/// SQLite database source for state key-value store
+pub struct SqliteState {
+    info: DatabaseInfo,
+    conn: Connection,
+}
+
+impl SqliteState {
+    pub fn new(name: &str, path: &Path) -> Result<Self, DbError> {
+        if !path.exists() {
+            return Err(DbError::NotFound(path.display().to_string()));
+        }
+
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
+        let columns = vec![
+            "key".to_string(),
+            "value_type".to_string(),
+            "value".to_string(),
+            "updated_at".to_string(),
+        ];
+
+        let count: usize = conn.query_row("SELECT COUNT(*) FROM state", [], |row| row.get(0))?;
+
+        Ok(Self {
+            info: DatabaseInfo {
+                name: name.to_string(),
+                db_type: DatabaseType::SqliteState,
+                path: path.display().to_string(),
+                record_count: count,
+                columns,
+                table_name: "state".to_string(),
+                connection_state: ConnectionState::Connected,
+            },
+            conn,
+        })
+    }
+
+    fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<Record> {
+        let key: String = row.get(0)?;
+        let value_type: String = row.get(1)?;
+        let value_int: Option<i64> = row.get(2)?;
+        let value_float: Option<f64> = row.get(3)?;
+        let value_string: Option<String> = row.get(4)?;
+        let value_bool: Option<i64> = row.get(5)?;
+        let value_json: Option<String> = row.get(6)?;
+        let created_at: String = row.get(7)?;
+        let updated_at: String = row.get(8)?;
+
+        // Format the value based on type
+        let value = match value_type.as_str() {
+            "int" => value_int.map(|v| v.to_string()).unwrap_or_default(),
+            "float" => value_float.map(|v| format!("{:.4}", v)).unwrap_or_default(),
+            "string" => value_string.unwrap_or_default(),
+            "bool" => value_bool
+                .map(|v| if v != 0 { "true" } else { "false" }.to_string())
+                .unwrap_or_default(),
+            "json" => value_json
+                .map(|s| {
+                    if s.len() > 50 {
+                        format!("{}...", &s[..50])
+                    } else {
+                        s
+                    }
+                })
+                .unwrap_or_default(),
+            "null" => "null".to_string(),
+            "bytes" => "<bytes>".to_string(),
+            _ => "?".to_string(),
+        };
+
+        let mut record = Record::new();
+        record.fields.insert("key".to_string(), key);
+        record.fields.insert("value_type".to_string(), value_type);
+        record.fields.insert("value".to_string(), value);
+        record
+            .fields
+            .insert("created_at".to_string(), created_at.clone());
+        record
+            .fields
+            .insert("updated_at".to_string(), updated_at.clone());
+        record.timestamp = Some(updated_at);
+
+        Ok(record)
+    }
+}
+
+impl DatabaseSource for SqliteState {
+    fn info(&self) -> &DatabaseInfo {
+        &self.info
+    }
+
+    fn info_mut(&mut self) -> &mut DatabaseInfo {
+        &mut self.info
+    }
+
+    fn health_check(&mut self) -> bool {
+        match self.conn.query_row("SELECT 1", [], |_| Ok(())) {
+            Ok(_) => {
+                self.info.connection_state = ConnectionState::Connected;
+                true
+            }
+            Err(e) => {
+                self.info.connection_state =
+                    ConnectionState::Disconnected(format!("SQLite error: {}", e));
+                false
+            }
+        }
+    }
+
+    fn fetch_recent(&self, limit: usize) -> Result<Vec<Record>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value_type, value_int, value_float, value_string,
+                    value_bool, value_json, created_at, updated_at
+             FROM state
+             ORDER BY updated_at DESC
+             LIMIT ?",
+        )?;
+
+        let records = stmt.query_map([limit], Self::row_to_record)?;
+
+        records
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)
+    }
+
+    fn fetch_before(&self, before: &str, limit: usize) -> Result<Vec<Record>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT key, value_type, value_int, value_float, value_string,
+                    value_bool, value_json, created_at, updated_at
+             FROM state
+             WHERE updated_at < ?
+             ORDER BY updated_at DESC
+             LIMIT ?",
+        )?;
+
+        let records = stmt.query_map((before, limit), Self::row_to_record)?;
+
+        records
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DbError::from)
+    }
+
+    fn execute_query(&self, query: &str) -> Result<Vec<Record>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare(query)
+            .map_err(|e| DbError::Query(e.to_string()))?;
+
+        let column_count = stmt.column_count();
+        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+        let mut records = Vec::new();
+        let mut rows = stmt.query([]).map_err(|e| DbError::Query(e.to_string()))?;
+
+        while let Some(row) = rows.next().map_err(|e| DbError::Query(e.to_string()))? {
+            let mut record = Record::new();
+
+            for i in 0..column_count {
+                let value: String = row
+                    .get::<_, rusqlite::types::Value>(i)
+                    .map(|v| match v {
+                        rusqlite::types::Value::Null => "NULL".to_string(),
+                        rusqlite::types::Value::Integer(n) => n.to_string(),
+                        rusqlite::types::Value::Real(f) => f.to_string(),
+                        rusqlite::types::Value::Text(s) => s,
+                        rusqlite::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
+                    })
+                    .unwrap_or_default();
+
+                record.fields.insert(column_names[i].clone(), value);
+            }
+
+            for ts_col in &["updated_at", "created_at", "timestamp"] {
+                if let Some(ts) = record.fields.get(*ts_col) {
+                    record.timestamp = Some(ts.clone());
+                    break;
+                }
+            }
+
+            records.push(record);
+        }
+
+        Ok(records)
+    }
+
+    fn refresh_count(&mut self) -> Result<usize, DbError> {
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM state", [], |row| row.get(0))?;
+        self.info.record_count = count;
+        Ok(count)
+    }
+
+    fn clear_database(&mut self) -> Result<usize, DbError> {
+        // Open a write connection to perform the delete
+        let write_conn = Connection::open_with_flags(
+            &self.info.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
+        let count = self.info.record_count;
+        write_conn.execute("DELETE FROM state", [])?;
+
+        // Re-open the read connection to see the changes
+        self.conn = Connection::open_with_flags(
+            &self.info.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
+        self.info.record_count = 0;
+        Ok(count)
+    }
+}

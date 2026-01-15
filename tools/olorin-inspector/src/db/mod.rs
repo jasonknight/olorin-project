@@ -8,5 +8,5 @@ mod sqlite;
 mod traits;
 
 pub use chromadb::ChromaDbSource;
-pub use sqlite::{SqliteChat, SqliteContext, SqliteFileTracker};
+pub use sqlite::{SqliteChat, SqliteContext, SqliteFileTracker, SqliteState};
 pub use traits::{ConnectionState, DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record};

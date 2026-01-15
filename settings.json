@@ -2,6 +2,9 @@
   "global": {
     "log_level": "INFO"
   },
+  "state": {
+    "db_path": "./data/state.db"
+  },
   "kafka": {
     "bootstrap_servers": "localhost:9092",
     "send_timeout": 10,

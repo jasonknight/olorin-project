@@ -72,6 +72,8 @@ _KEY_TO_PATH = {
     "CHAT_HISTORY_ENABLED": "chat.history_enabled",
     "CHAT_DB_PATH": "chat.db_path",
     "CHAT_RESET_PATTERNS": "chat.reset_patterns",
+    # State
+    "STATE_DB_PATH": "state.db_path",
 }
 
 

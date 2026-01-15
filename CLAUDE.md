@@ -49,11 +49,13 @@ pre-commit run --all-files
 # Run these commands when you've written new Rust code
 # Format all Rust projects (uses edition from each Cargo.toml)
 cargo fmt --manifest-path libs/config-rs/Cargo.toml
+cargo fmt --manifest-path libs/state-rs/Cargo.toml
 cargo fmt --manifest-path tools/chat/Cargo.toml
 cargo fmt --manifest-path tools/olorin-inspector/Cargo.toml
 
 # Run clippy on all Rust projects and fix any issues found
 cargo clippy --manifest-path libs/config-rs/Cargo.toml -- -D warnings
+cargo clippy --manifest-path libs/state-rs/Cargo.toml -- -D warnings
 cargo clippy --manifest-path tools/chat/Cargo.toml -- -D warnings
 cargo clippy --manifest-path tools/olorin-inspector/Cargo.toml -- -D warnings
 ``` 
@@ -316,6 +318,108 @@ let patterns = config.get_list("CHAT_RESET_PATTERNS", None);
 **Backward Compatibility**: Flat keys like `CHROMADB_PORT` are automatically mapped to nested JSON paths like `hippocampus.chromadb.port`. Existing code using flat keys continues to work without changes.
 
 **Hot-Reload**: Consumer components (broca, cortex, enrichener) detect changes to `settings.json` and automatically reload configuration without restarting.
+
+### State Management
+
+**Centralized State**: All runtime state is stored in a SQLite database (`./data/state.db`) with typed columns. The shared state library (`libs/state.py` for Python, `libs/state-rs` for Rust) provides type-safe access for sharing state across all components.
+
+**Schema Design**: Uses discriminated union pattern with separate columns for each data type:
+```sql
+CREATE TABLE state (
+    key TEXT PRIMARY KEY,
+    value_type TEXT NOT NULL,  -- 'null', 'int', 'float', 'string', 'bool', 'json', 'bytes'
+    value_int INTEGER,
+    value_float REAL,
+    value_string TEXT,
+    value_bool INTEGER,
+    value_json TEXT,
+    value_bytes BLOB,
+    created_at TEXT,
+    updated_at TEXT
+);
+```
+
+**Python Usage**:
+```python
+from libs.state import State, get_state
+
+state = State()  # Or use get_state() singleton
+
+# Set values (type auto-detected)
+state.set("broca.audio_pid", 12345)
+state.set("broca.is_playing", True)
+state.set("cortex.status", "running")
+state.set("system.info", {"version": "1.0", "components": ["broca", "cortex"]})
+
+# Get values with type safety
+pid = state.get_int("broca.audio_pid")  # -> Optional[int]
+playing = state.get_bool("broca.is_playing")  # -> bool
+info = state.get_json("system.info")  # -> Optional[dict]
+
+# With defaults
+pid = state.get_int("broca.audio_pid", default=0)
+
+# Delete values
+state.delete("broca.audio_pid")
+state.delete_prefix("broca.")  # Delete all broca.* keys
+
+# List keys
+all_keys = state.keys()
+broca_keys = state.keys(prefix="broca.")
+```
+
+**Rust Usage**:
+```rust
+use olorin_state::{State, get_state};
+
+let state = State::new(None)?;  // Or use get_state(None) singleton
+
+// Set values with explicit types
+state.set_int("broca.audio_pid", 12345)?;
+state.set_bool("broca.is_playing", true)?;
+state.set_string("cortex.status", "running")?;
+state.set_json("system.info", &serde_json::json!({"version": "1.0"}))?;
+
+// Get values with type safety
+let pid = state.get_int("broca.audio_pid")?;  // -> Option<i64>
+let playing = state.get_bool("broca.is_playing")?;  // -> bool
+let info = state.get_json("system.info")?;  // -> Option<serde_json::Value>
+
+// With defaults
+let pid = state.get_int_or("broca.audio_pid", 0)?;
+
+// Delete values
+state.delete("broca.audio_pid")?;
+state.delete_prefix("broca.")?;  // Delete all broca.* keys
+
+// List keys
+let all_keys = state.keys(None)?;
+let broca_keys = state.keys(Some("broca."))?;
+```
+
+**State Library Features**:
+- `state.set(key, value)` - Set with auto-detected type
+- `state.set_int(key, value)` / `set_float()` / `set_string()` / `set_bool()` / `set_json()` / `set_bytes()` - Explicit type setters
+- `state.get(key, default)` - Get with auto-detected type
+- `state.get_int(key, default)` / `get_float()` / `get_string()` / `get_bool()` / `get_json()` / `get_bytes()` - Type-safe getters
+- `state.get_type(key)` - Get the ValueType enum for a key
+- `state.exists(key)` - Check if key exists
+- `state.delete(key)` - Delete a single key
+- `state.delete_prefix(prefix)` - Delete all keys with prefix
+- `state.keys(prefix)` - List keys with optional prefix filter
+- `state.items(prefix)` - Get key-value pairs with optional prefix filter
+- `state.get_metadata(key)` - Get type and timestamps
+- `state.clear()` - Delete all state entries
+- `state.db_path` - Path to the state database
+
+**Common State Keys** (conventions for component state):
+- `broca.audio_pid` - PID of currently playing afplay process (int or null)
+- `broca.is_playing` - Whether Broca is currently playing audio (bool)
+- `cortex.status` - Current status of Cortex consumer (string)
+- `hippocampus.last_poll` - Timestamp of last directory poll (string)
+- `system.pids.<component>` - Process ID for each component (int)
+
+**Thread Safety**: The State class uses thread-local SQLite connections with WAL mode for safe concurrent access from multiple threads and processes.
 
 ### Process Management
 

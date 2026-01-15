@@ -11,6 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 
+# Add project root to path for libs import
+sys.path.insert(0, str(Path(__file__).parent))
+
+from libs.state import get_state
+
 
 # ANSI color codes
 class Color:
@@ -204,6 +209,60 @@ def check_processes():
     return process_info
 
 
+def check_state():
+    """Check system state from the state database."""
+    state_info = {
+        "system_running": False,
+        "started_at": None,
+        "stopped_at": None,
+        "pids": {},
+        "containers": {},
+        "component_status": {},
+    }
+
+    try:
+        state = get_state()
+
+        # System-level state
+        state_info["system_running"] = state.get_bool("system.running")
+        state_info["started_at"] = state.get_string("system.started_at")
+        state_info["stopped_at"] = state.get_string("system.stopped_at")
+
+        # Get all PIDs from state
+        for key in state.keys(prefix="system.pids."):
+            component = key.replace("system.pids.", "")
+            pid = state.get_int(key)
+            if pid:
+                state_info["pids"][component] = pid
+
+        # Get container status from state
+        for key in state.keys(prefix="containers."):
+            parts = key.split(".")
+            if len(parts) >= 3:
+                container = parts[1]
+                prop = parts[2]
+                if container not in state_info["containers"]:
+                    state_info["containers"][container] = {}
+                if prop == "status":
+                    state_info["containers"][container]["status"] = state.get_string(
+                        key
+                    )
+                elif prop == "port":
+                    state_info["containers"][container]["port"] = state.get_int(key)
+
+        # Get component status
+        for key in state.keys():
+            if key.endswith(".status") and not key.startswith("containers."):
+                component = key.replace(".status", "")
+                if component != "system":
+                    state_info["component_status"][component] = state.get_string(key)
+
+    except Exception as e:
+        state_info["error"] = str(e)
+
+    return state_info
+
+
 def analyze_logs(tail_lines=50):
     """Analyze log files for errors and warnings."""
     logs_dir = Path("logs")
@@ -345,7 +404,66 @@ def print_log_health(log_analysis):
                 print(f"      {issue_color}└─ {issue_line}{Color.NC}")
 
 
-def print_summary(containers, processes, log_analysis):
+def print_state_info(state_info):
+    """Print state database information."""
+    print_section("State Database")
+
+    if "error" in state_info:
+        print(f"  {Color.RED}Error reading state: {state_info['error']}{Color.NC}")
+        return
+
+    # System state
+    running = state_info["system_running"]
+    running_icon = get_status_icon(running)
+    running_status = (
+        f"{Color.GREEN}Running{Color.NC}"
+        if running
+        else f"{Color.RED}Stopped{Color.NC}"
+    )
+
+    print(f"  System State:  {running_icon} {running_status}")
+
+    if state_info["started_at"]:
+        print(f"  Last Started:  {state_info['started_at']}")
+    if state_info["stopped_at"] and not running:
+        print(f"  Last Stopped:  {state_info['stopped_at']}")
+
+    # PIDs in state
+    if state_info["pids"]:
+        print(f"\n  {Color.BOLD}Registered PIDs:{Color.NC}")
+        for component, pid in sorted(state_info["pids"].items()):
+            # Verify if PID is actually running
+            try:
+                subprocess.run(
+                    ["ps", "-p", str(pid)], capture_output=True, check=True, timeout=2
+                )
+                pid_status = f"{Color.GREEN}(running){Color.NC}"
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pid_status = f"{Color.RED}(not running){Color.NC}"
+
+            print(f"    {component:<30} PID {pid:<8} {pid_status}")
+
+    # Container state
+    if state_info["containers"]:
+        print(f"\n  {Color.BOLD}Container State:{Color.NC}")
+        for container, info in sorted(state_info["containers"].items()):
+            status = info.get("status", "unknown")
+            port = info.get("port", "N/A")
+            status_color = Color.GREEN if status == "running" else Color.RED
+            print(
+                f"    {container:<15} {status_color}{status:<10}{Color.NC} port:{port}"
+            )
+
+    # Component status
+    if state_info["component_status"]:
+        print(f"\n  {Color.BOLD}Component Status:{Color.NC}")
+        for component, status in sorted(state_info["component_status"].items()):
+            status_color = Color.GREEN if status == "running" else Color.RED
+            icon = get_status_icon(status == "running")
+            print(f"    {icon} {component:<30} {status_color}{status}{Color.NC}")
+
+
+def print_summary(containers, processes, log_analysis, state_info=None):
     """Print overall system summary."""
     print_section("System Summary")
 
@@ -359,15 +477,29 @@ def print_summary(containers, processes, log_analysis):
     log_errors = sum(a["errors"] for a in log_analysis.values())
     log_warnings = sum(a["warnings"] for a in log_analysis.values())
 
+    # Check state consistency
+    state_consistent = True
+    if state_info:
+        state_running = state_info.get("system_running", False)
+        if state_running and healthy_processes == 0:
+            state_consistent = False
+        elif not state_running and healthy_processes > 0:
+            state_consistent = False
+
     # Overall health
     all_healthy = (
         healthy_containers == total_containers
         and healthy_processes == total_processes
         and log_errors == 0
+        and state_consistent
     )
 
     if all_healthy:
         overall_status = f"{Color.GREEN}✓ HEALTHY{Color.NC}"
+    elif not state_consistent:
+        overall_status = (
+            f"{Color.YELLOW}⚠ STATE MISMATCH (run ./down && ./up){Color.NC}"
+        )
     elif log_errors > 0:
         overall_status = f"{Color.RED}✗ DEGRADED (errors detected){Color.NC}"
     elif healthy_containers < total_containers or healthy_processes < total_processes:
@@ -376,7 +508,18 @@ def print_summary(containers, processes, log_analysis):
         overall_status = f"{Color.YELLOW}⚠ WARNING (check logs){Color.NC}"
 
     print(f"\n  Overall Status: {overall_status}")
-    print(f"\n  Containers:    {healthy_containers}/{total_containers} running")
+
+    # State database info
+    if state_info and not state_info.get("error"):
+        state_running = state_info.get("system_running", False)
+        state_str = (
+            f"{Color.GREEN}running{Color.NC}"
+            if state_running
+            else f"{Color.RED}stopped{Color.NC}"
+        )
+        print(f"\n  State DB:      {state_str}")
+
+    print(f"  Containers:    {healthy_containers}/{total_containers} running")
     print(f"  Processes:     {healthy_processes}/{total_processes} running")
     print(
         f"  Log Issues:    {Color.RED if log_errors > 0 else ''}{log_errors} errors{Color.NC}, "
@@ -404,12 +547,14 @@ def main():
         containers = check_containers()
         processes = check_processes()
         log_analysis = analyze_logs()
+        state_info = check_state()
 
         # Display results
+        print_state_info(state_info)
         print_containers(containers)
         print_processes(processes)
         print_log_health(log_analysis)
-        print_summary(containers, processes, log_analysis)
+        print_summary(containers, processes, log_analysis, state_info)
 
         print(f"\n{Color.BOLD}{Color.CYAN}{'=' * 80}{Color.NC}\n")
 

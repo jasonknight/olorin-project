@@ -1,11 +1,84 @@
 #!/bin/bash
 # Orchestration script to shut down all olorin-project components
 
+# Get the directory where this script lives (project root)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
+
+# Function to update state database
+update_state() {
+    local key=$1
+    local value=$2
+    local value_type=${3:-"int"}  # default to int
+
+    cd "$SCRIPT_DIR"
+    if [ "$value_type" = "int" ]; then
+        python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.set_int('$key', $value)
+" 2>/dev/null || true
+    elif [ "$value_type" = "string" ]; then
+        python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.set_string('$key', '$value')
+" 2>/dev/null || true
+    elif [ "$value_type" = "bool" ]; then
+        python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.set_bool('$key', $value)
+" 2>/dev/null || true
+    fi
+}
+
+# Function to delete a state key
+delete_state() {
+    local key=$1
+
+    cd "$SCRIPT_DIR"
+    python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.delete('$key')
+" 2>/dev/null || true
+}
+
+# Function to delete all state keys with a prefix
+delete_state_prefix() {
+    local prefix=$1
+
+    cd "$SCRIPT_DIR"
+    python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+state.delete_prefix('$prefix')
+" 2>/dev/null || true
+}
+
+# Function to set system as stopped
+set_system_stopped() {
+    update_state "system.running" "False" "bool"
+    update_state "system.stopped_at" "$(date -u +%Y-%m-%dT%H:%M:%S)" "string"
+    # Clear all PIDs
+    delete_state_prefix "system.pids."
+}
 
 echo -e "${GREEN}Shutting down olorin-project infrastructure...${NC}"
 
@@ -38,6 +111,10 @@ if [ -d ".pids" ]; then
             else
                 echo -e "${YELLOW}$name (PID: $pid) not running${NC}"
             fi
+
+            # Update state for this process
+            update_state "${name}.status" "stopped" "string"
+            delete_state "system.pids.${name}"
 
             rm "$pidfile"
         fi
@@ -104,6 +181,7 @@ if podman ps -a --format "{{.Names}}" | grep -q "^kafkaserver$"; then
     podman stop kafkaserver 2>/dev/null || true
     podman rm kafkaserver 2>/dev/null || true
     echo -e "${GREEN}Stopped kafkaserver${NC}"
+    update_state "containers.kafkaserver.status" "stopped" "string"
 else
     echo -e "${YELLOW}kafkaserver not running${NC}"
 fi
@@ -114,9 +192,13 @@ if podman ps -a --format "{{.Names}}" | grep -q "^chromadb$"; then
     podman stop chromadb 2>/dev/null || true
     podman rm chromadb 2>/dev/null || true
     echo -e "${GREEN}Stopped chromadb${NC}"
+    update_state "containers.chromadb.status" "stopped" "string"
 else
     echo -e "${YELLOW}chromadb not running${NC}"
 fi
+
+# Update system state
+set_system_stopped
 
 # Summary and Verification
 echo -e "\n${GREEN}========================================${NC}"

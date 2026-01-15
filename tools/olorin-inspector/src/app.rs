@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::db::{
     ChromaDbSource, DatabaseInfo, DatabaseSource, DatabaseType, DbError, Record, SqliteChat,
-    SqliteContext, SqliteFileTracker,
+    SqliteContext, SqliteFileTracker, SqliteState,
 };
 
 /// Configuration for a failed ChromaDB connection (for retry)
@@ -219,6 +219,20 @@ impl App {
                 Err(DbError::NotFound(_)) => {}
                 Err(e) => {
                     self.load_errors.push(format!("Chat History: {}", e));
+                }
+            }
+        }
+
+        // System state database
+        if let Some(state_path) = self
+            .config
+            .get_path("STATE_DB_PATH", Some("./data/state.db"))
+        {
+            match SqliteState::new("System State", &state_path) {
+                Ok(db) => self.databases.push(Box::new(db)),
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => {
+                    self.load_errors.push(format!("System State: {}", e));
                 }
             }
         }
