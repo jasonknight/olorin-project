@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 use tui_textarea::TextArea;
 
+use crate::api::{self, SlashCommand};
 use crate::db::ChatDb;
 use crate::kafka::KafkaProducer;
 use crate::message::{ChatMessage, DisplayMessage};
@@ -42,10 +43,21 @@ pub struct App<'a> {
     pub status: String,
     /// Whether we're in sending state
     pub is_sending: bool,
+    /// Control API base URL
+    control_api_url: String,
+    /// Available slash commands from control API
+    pub slash_commands: Vec<SlashCommand>,
+    /// Current autocomplete ghost text (portion to append)
+    pub completion: Option<String>,
 }
 
 impl<'a> App<'a> {
-    pub fn new(chat_db_path: PathBuf, bootstrap_servers: &str) -> Result<Self> {
+    pub fn new(
+        chat_db_path: PathBuf,
+        bootstrap_servers: &str,
+        control_api_url: &str,
+        slash_commands: Vec<SlashCommand>,
+    ) -> Result<Self> {
         // Create channel for background events
         let (tx, rx) = mpsc::channel();
 
@@ -76,6 +88,9 @@ impl<'a> App<'a> {
             event_rx: rx,
             status: String::from("Ready"),
             is_sending: false,
+            control_api_url: control_api_url.to_string(),
+            slash_commands,
+            completion: None,
         })
     }
 
@@ -233,5 +248,89 @@ impl<'a> App<'a> {
     /// Get the number of messages
     pub fn message_count(&self) -> usize {
         self.messages.len()
+    }
+
+    /// Check if the given text is a known slash command
+    pub fn is_slash_command(&self, text: &str) -> bool {
+        let text = text.trim();
+        self.slash_commands.iter().any(|cmd| {
+            text == cmd.slash_command || text.starts_with(&format!("{} ", cmd.slash_command))
+        })
+    }
+
+    /// Find completion for partial slash command input
+    ///
+    /// Returns the portion of the command to append (ghost text),
+    /// or None if no completion is available.
+    pub fn find_completion(&self, input: &str) -> Option<String> {
+        if !input.starts_with('/') {
+            return None;
+        }
+
+        self.slash_commands
+            .iter()
+            .find(|cmd| cmd.slash_command.starts_with(input) && cmd.slash_command != input)
+            .map(|cmd| cmd.slash_command[input.len()..].to_string())
+    }
+
+    /// Update the completion based on current input
+    pub fn update_completion(&mut self) {
+        let text: String = self.input.lines().join("\n");
+        // Only show completion for single-line input starting with /
+        if text.starts_with('/') && !text.contains('\n') {
+            self.completion = self.find_completion(&text);
+        } else {
+            self.completion = None;
+        }
+    }
+
+    /// Accept the current completion (insert ghost text)
+    pub fn accept_completion(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            for c in completion.chars() {
+                self.input.insert_char(c);
+            }
+        }
+    }
+
+    /// Execute a slash command via the control API
+    pub async fn execute_slash_command(&mut self, text: &str) {
+        self.is_sending = true;
+        self.status = String::from("Executing command...");
+
+        match api::execute_command(&self.control_api_url, text).await {
+            Ok(response) => {
+                if response.success {
+                    if let Some(result) = response.result {
+                        if let Some(message) = result.get("message").and_then(|m| m.as_str()) {
+                            self.status = message.to_string();
+                        } else {
+                            self.status = String::from("Command executed successfully");
+                        }
+                    } else {
+                        self.status = String::from("Command executed successfully");
+                    }
+                } else {
+                    self.status = format!(
+                        "Command failed: {}",
+                        response
+                            .error
+                            .unwrap_or_else(|| "Unknown error".to_string())
+                    );
+                }
+                // Clear the input on success
+                self.input = TextArea::default();
+                self.input
+                    .set_cursor_line_style(ratatui::style::Style::default());
+                self.input
+                    .set_placeholder_text("Type your message... (Enter to send, Esc to quit)");
+                self.completion = None;
+            }
+            Err(e) => {
+                self.status = format!("Command error: {}", e);
+            }
+        }
+
+        self.is_sending = false;
     }
 }

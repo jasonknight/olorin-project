@@ -133,6 +133,13 @@ class TTSConsumer:
     def process_message(self, message):
         """Process a single message and convert to speech"""
         try:
+            # Check if audio is muted - if so, skip processing but still consume
+            if self.state.get_bool("broca.audio_muted", default=False):
+                logger.info(
+                    "Audio muted - skipping message (still consuming to prevent backlog)"
+                )
+                return
+
             # Try to parse as JSON first, fallback to plain text
             if isinstance(message, str):
                 try:

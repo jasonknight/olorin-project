@@ -33,5 +33,8 @@ anyhow = "1"
 dirs = "6"
 textwrap = "0.16"
 
+# HTTP client for control API
+reqwest = { version = "0.12", features = ["json"] }
+
 # Configuration
 olorin-config = { path = "../../libs/config-rs" }

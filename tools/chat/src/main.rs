@@ -2,7 +2,9 @@
 //!
 //! A terminal user interface for monitoring and interacting with the Olorin AI pipeline.
 //! Displays chat messages from the database and allows sending new prompts via Kafka.
+//! Supports slash commands via the control API with inline autocomplete.
 
+mod api;
 mod app;
 mod db;
 mod kafka;
@@ -38,6 +40,18 @@ async fn main() -> Result<()> {
         .get("KAFKA_BOOTSTRAP_SERVERS", Some("localhost:9092"))
         .unwrap_or_else(|| "localhost:9092".to_string());
 
+    // Get control API URL from config
+    let control_api_host = config
+        .get("CONTROL_API_HOST", Some("localhost"))
+        .unwrap_or_else(|| "localhost".to_string());
+    let control_api_port = config
+        .get_int("CONTROL_API_PORT", Some(8765))
+        .unwrap_or(8765);
+    let control_api_url = format!("http://{}:{}", control_api_host, control_api_port);
+
+    // Fetch slash commands BEFORE entering raw mode
+    let slash_commands = crate::api::fetch_commands(&control_api_url).await;
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -46,7 +60,12 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(chat_db_path, &bootstrap_servers)?;
+    let mut app = App::new(
+        chat_db_path,
+        &bootstrap_servers,
+        &control_api_url,
+        slash_commands,
+    )?;
 
     // Main event loop
     let result = run_event_loop(&mut terminal, &mut app).await;
@@ -86,9 +105,24 @@ async fn run_event_loop(
                         app.should_quit = true;
                     }
 
-                    // Send message (Enter)
+                    // Send message or execute slash command (Enter)
                     (KeyCode::Enter, KeyModifiers::NONE) => {
-                        app.send_message().await;
+                        let text: String = app.input.lines().join("\n").trim().to_string();
+                        if !text.is_empty() {
+                            if app.is_slash_command(&text) {
+                                app.execute_slash_command(&text).await;
+                            } else {
+                                app.send_message().await;
+                            }
+                        }
+                    }
+
+                    // Accept autocomplete (Tab)
+                    (KeyCode::Tab, KeyModifiers::NONE) => {
+                        if app.completion.is_some() {
+                            app.accept_completion();
+                            app.update_completion();
+                        }
                     }
 
                     // Scroll chat
@@ -114,12 +148,14 @@ async fn run_event_loop(
                     // Shift+Enter: insert explicit newline
                     (KeyCode::Enter, KeyModifiers::SHIFT) => {
                         app.input.insert_newline();
+                        app.update_completion();
                     }
 
                     // Pass other keys to text area
                     _ => {
                         let input = Input::from(key);
                         app.input.input(input);
+                        app.update_completion();
                     }
                 }
             }

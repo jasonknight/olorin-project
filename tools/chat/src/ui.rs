@@ -518,8 +518,10 @@ fn parse_inline_markdown(
     spans
 }
 
-/// Render the input text area with visual soft-wrapping
+/// Render the input text area with visual soft-wrapping and ghost text completion
 fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
+    use ratatui::text::Line as TextLine;
+    use ratatui::text::Text;
     use ratatui::widgets::Wrap;
 
     let block = Block::default()
@@ -533,14 +535,37 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
     // Get text and cursor from tui-textarea
     let lines = app.input.lines();
     let (cursor_row, cursor_col) = app.input.cursor();
-    let text = lines.join("\n");
 
     let text_style = Style::default().fg(Color::White);
+    let ghost_style = Style::default().fg(Color::DarkGray);
+
+    // Build display text - handle ghost completion on single-line input only
+    let display_text: Text = if lines.is_empty() {
+        // Empty input
+        Text::from("")
+    } else if lines.len() == 1 {
+        if let Some(ref completion) = app.completion {
+            // Single line with ghost completion
+            let spans = vec![
+                Span::styled(lines[0].clone(), text_style),
+                Span::styled(completion.clone(), ghost_style),
+            ];
+            Text::from(TextLine::from(spans))
+        } else {
+            // Single line without completion
+            Text::from(lines[0].as_str()).style(text_style)
+        }
+    } else {
+        // Multi-line: render each line separately, no ghost text
+        let styled_lines: Vec<TextLine> = lines
+            .iter()
+            .map(|line| TextLine::from(Span::styled(line.clone(), text_style)))
+            .collect();
+        Text::from(styled_lines)
+    };
 
     // Use Paragraph with word wrapping
-    let paragraph = Paragraph::new(text.clone())
-        .style(text_style)
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(display_text).wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, inner);
 
@@ -593,12 +618,18 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
 /// Render the status bar
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let scroll_indicator = if app.auto_scroll { "" } else { " [SCROLLED] " };
+    let tab_hint = if app.completion.is_some() {
+        "Tab: Complete | "
+    } else {
+        ""
+    };
 
     let status_text = format!(
-        " {} | Msgs: {}{} | Enter: Send | Shift+Enter: Newline | Esc: Quit ",
+        " {} | Msgs: {}{} | {}Enter: Send | Shift+Enter: Newline | Esc: Quit ",
         app.status,
         app.message_count(),
-        scroll_indicator
+        scroll_indicator,
+        tab_hint
     );
 
     let style = if app.is_sending {
