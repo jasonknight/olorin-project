@@ -18,6 +18,7 @@ from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
 from libs.chat_store import ChatStore
 from libs.state import get_state
+from libs.tool_client import ToolClient
 
 # Initialize config with hot-reload support
 config = Config(watch=True)
@@ -338,6 +339,10 @@ class ExoConsumer:
         self._state = (
             get_state()
         )  # Singleton state manager for cross-component visibility
+
+        # AI Tool client for tool use (separate from slash commands)
+        self.tool_client = ToolClient(self.config.cfg)
+        self.available_tools: list[dict] = []  # Will be populated in start()
 
         logger.info("ExoConsumer initialized successfully")
         logger.info(f"  Input topic: {config.kafka_input_topic}")
@@ -712,6 +717,60 @@ class ExoConsumer:
             {"role": "assistant", "content": assistant_ack},
         ]
 
+    def _build_tool_system_prompt(self) -> str | None:
+        """
+        Build a system prompt that describes available tools and how to use them.
+
+        Returns:
+            System prompt string if tools are available, None otherwise
+        """
+        if not self.available_tools:
+            return None
+
+        tool_descriptions = []
+        for tool in self.available_tools:
+            func = tool.get("function", {})
+            name = func.get("name", "unknown")
+            description = func.get("description", "No description")
+            params = func.get("parameters", {}).get("properties", {})
+            required = func.get("parameters", {}).get("required", [])
+
+            # Build parameter documentation
+            param_docs = []
+            for param_name, param_info in params.items():
+                param_type = param_info.get("type", "string")
+                param_desc = param_info.get("description", "")
+                req_marker = " (required)" if param_name in required else " (optional)"
+                param_docs.append(
+                    f"    - {param_name} ({param_type}){req_marker}: {param_desc}"
+                )
+
+            params_str = "\n".join(param_docs) if param_docs else "    (no parameters)"
+
+            tool_descriptions.append(f"""- **{name}**: {description}
+  Parameters:
+{params_str}""")
+
+        tools_block = "\n\n".join(tool_descriptions)
+
+        system_prompt = f"""You are a helpful AI assistant with access to tools. When the user asks you to perform an action that matches one of your available tools, you MUST use the appropriate tool to complete the task.
+
+## Available Tools
+
+{tools_block}
+
+## When to Use Tools
+
+- When the user asks you to write, save, or export content to a file, use the `write` tool.
+- When the user mentions a filename or asks to create a file, use the `write` tool.
+- Always use tools when they match the user's request - do not just describe what you would do.
+
+## How to Use Tools
+
+When you decide to use a tool, call it with the required parameters. After the tool executes, you will receive the result and can then respond to the user with confirmation or any follow-up information."""
+
+        return system_prompt
+
     def _build_messages_with_history(
         self, prompt: str, message_id: str, context_chunks: list[dict] | None = None
     ) -> list[dict]:
@@ -733,6 +792,14 @@ class ExoConsumer:
         """
         thread_name = threading.current_thread().name
         messages = []
+
+        # Add system prompt for tools if available
+        tool_system_prompt = self._build_tool_system_prompt()
+        if tool_system_prompt:
+            messages.append({"role": "system", "content": tool_system_prompt})
+            logger.info(
+                f"[{thread_name}] Added tool system prompt ({len(tool_system_prompt)} chars)"
+            )
 
         # If chat history is disabled, just return the current prompt
         if self.chat_store is None:
@@ -817,7 +884,7 @@ class ExoConsumer:
                 f"[{thread_name}] Built messages array with {len(messages)} total messages"
             )
             logger.info(
-                f"[{thread_name}]   - History: {len(history)}, Context exchange: {2 if context_chunks else 0}, New prompt: 1"
+                f"[{thread_name}]   - System: {1 if tool_system_prompt else 0}, History: {len(history)}, Context exchange: {2 if context_chunks else 0}, New prompt: 1"
             )
             return messages
 
@@ -826,9 +893,12 @@ class ExoConsumer:
                 f"[{thread_name}] Error building message history: {e}", exc_info=True
             )
             # Fallback: return just the current prompt with context if available
+            # Re-add system prompt since we're rebuilding messages
             messages = []
+            if tool_system_prompt:
+                messages.append({"role": "system", "content": tool_system_prompt})
             if context_chunks:
-                messages = self._format_context_as_exchange(context_chunks)
+                messages.extend(self._format_context_as_exchange(context_chunks))
             messages.append({"role": "user", "content": prompt})
             logger.warning(
                 f"[{thread_name}] Fallback: built {len(messages)} message(s) without history"
@@ -940,6 +1010,113 @@ User's question: {prompt}"""
         except Exception as e:
             logger.warning(f"[{thread_name}] Failed to clean up context: {e}")
 
+    def _execute_tool_calls(
+        self,
+        tool_calls: list[dict],
+        conversation_id: str | None,
+        prompt_id: str | None,
+    ) -> list[dict]:
+        """
+        Execute accumulated tool calls and return results.
+
+        Args:
+            tool_calls: List of tool call objects from the API response
+            conversation_id: Active conversation ID for chat history
+            prompt_id: Original prompt ID for tracking
+
+        Returns:
+            List of tool result message dicts for the next API call
+        """
+        thread_name = threading.current_thread().name
+        results = []
+
+        # Store the assistant's tool call message in chat history
+        if self.chat_store is not None and conversation_id:
+            try:
+                # Convert tool calls to serializable format
+                tool_calls_data = []
+                for tc in tool_calls:
+                    tool_calls_data.append(
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": tc.get("function", {}),
+                        }
+                    )
+                self.chat_store.add_tool_call_message(
+                    conversation_id, tool_calls_data, prompt_id
+                )
+                logger.info(
+                    f"[{thread_name}] 💬 Stored tool call message in chat history"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[{thread_name}] ⚠ Failed to store tool call message: {e}"
+                )
+
+        # Execute each tool call
+        for tc in tool_calls:
+            tool_call_id = tc.get("id", "")
+            function_info = tc.get("function", {})
+            function_name = function_info.get("name", "")
+            arguments_str = function_info.get("arguments", "{}")
+
+            logger.info(
+                f"[{thread_name}] 🔧 Executing tool: {function_name} (id={tool_call_id})"
+            )
+
+            try:
+                # Parse arguments
+                arguments = json.loads(arguments_str)
+                logger.debug(f"[{thread_name}]   Arguments: {arguments}")
+
+                # Call the tool
+                result = self.tool_client.call_tool(function_name, arguments)
+
+                if result.get("success"):
+                    result_content = result.get("result", "")
+                    logger.info(
+                        f"[{thread_name}] ✓ Tool {function_name} succeeded: {result_content[:100]}..."
+                    )
+                else:
+                    error = result.get("error", {})
+                    result_content = f"Error: {error.get('type', 'Unknown')}: {error.get('message', 'Unknown error')}"
+                    logger.warning(
+                        f"[{thread_name}] ✗ Tool {function_name} failed: {result_content}"
+                    )
+
+            except json.JSONDecodeError as e:
+                result_content = f"Error: Invalid arguments JSON: {e}"
+                logger.error(f"[{thread_name}] ✗ Failed to parse arguments: {e}")
+            except Exception as e:
+                result_content = f"Error: {type(e).__name__}: {e}"
+                logger.error(f"[{thread_name}] ✗ Tool execution error: {e}")
+
+            # Store tool result in chat history
+            if self.chat_store is not None and conversation_id:
+                try:
+                    self.chat_store.add_tool_result_message(
+                        conversation_id, tool_call_id, function_name, result_content
+                    )
+                    logger.info(
+                        f"[{thread_name}] 💬 Stored tool result in chat history"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{thread_name}] ⚠ Failed to store tool result: {e}"
+                    )
+
+            # Build the tool result message for the API
+            results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result_content,
+                }
+            )
+
+        return results
+
     def _check_config_reload(self):
         """Check if .env has changed and reload configuration if needed"""
         logger.debug("Checking for .env file changes...")
@@ -989,7 +1166,13 @@ User's question: {prompt}"""
             ):
                 logger.info("Re-detecting tool support after endpoint/model change...")
                 self._tools_supported = None  # Clear cache
-                self.check_tool_support(force_redetect=True)
+                tools_supported = self.check_tool_support(force_redetect=True)
+                # Re-discover tools if supported
+                if tools_supported:
+                    logger.info("Re-discovering AI tools...")
+                    self.available_tools = self.tool_client.discover_tools()
+                else:
+                    self.available_tools = []
 
             logger.info("Configuration reloaded successfully")
         else:
@@ -1188,6 +1371,12 @@ User's question: {prompt}"""
             if self.config.max_tokens is not None:
                 api_params["max_tokens"] = self.config.max_tokens
 
+            # Add tools if available and supported
+            if self.available_tools:
+                api_params["tools"] = self.available_tools
+                tool_names = [t["function"]["name"] for t in self.available_tools]
+                logger.info(f"[{thread_name}] 🔧 Tools enabled: {tool_names}")
+
             logger.info(f"[{thread_name}] 🌊 Starting STREAMING API call...")
             stream = self.client.chat.completions.create(**api_params)
 
@@ -1236,9 +1425,51 @@ User's question: {prompt}"""
                 f"[{thread_name}] 🧠 Tracking thinking blocks in real-time - will skip sending during <think>/<thinking> tags"
             )
 
+            # Tool call tracking for streaming
+            accumulated_tool_calls: list[dict] = []
+            finish_reason = None
+
             for chunk in stream:
                 if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+
+                    # Track finish_reason (will be "tool_calls" if model wants to call tools)
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+
+                    # Accumulate tool calls from streaming chunks
+                    if hasattr(delta, "tool_calls") and delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            # Each tool call chunk has an index
+                            tc_index = tc.index if hasattr(tc, "index") else 0
+
+                            # Expand accumulated_tool_calls list if needed
+                            while len(accumulated_tool_calls) <= tc_index:
+                                accumulated_tool_calls.append(
+                                    {
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                )
+
+                            # Accumulate tool call data
+                            if hasattr(tc, "id") and tc.id:
+                                accumulated_tool_calls[tc_index]["id"] = tc.id
+                            if hasattr(tc, "function") and tc.function:
+                                if hasattr(tc.function, "name") and tc.function.name:
+                                    accumulated_tool_calls[tc_index]["function"][
+                                        "name"
+                                    ] += tc.function.name
+                                if (
+                                    hasattr(tc.function, "arguments")
+                                    and tc.function.arguments
+                                ):
+                                    accumulated_tool_calls[tc_index]["function"][
+                                        "arguments"
+                                    ] += tc.function.arguments
+
                     if hasattr(delta, "content") and delta.content:
                         chunk_count += 1
                         content = delta.content
@@ -1443,6 +1674,117 @@ User's question: {prompt}"""
             logger.info(
                 f"[{thread_name}]   Full response length: {len(full_response_text)} characters"
             )
+            logger.info(f"[{thread_name}]   Finish reason: {finish_reason}")
+
+            # Handle tool calls if the model requested them
+            if finish_reason == "tool_calls" and accumulated_tool_calls:
+                logger.info(f"[{thread_name}] 🔧 TOOL CALLS DETECTED!")
+                logger.info(
+                    f"[{thread_name}]   Number of tool calls: {len(accumulated_tool_calls)}"
+                )
+                for i, tc in enumerate(accumulated_tool_calls):
+                    logger.info(
+                        f"[{thread_name}]   Tool {i + 1}: {tc['function']['name']}"
+                    )
+
+                # Get conversation ID for storing tool messages
+                conversation_id = None
+                if self.chat_store is not None:
+                    conversation_id = self.chat_store.get_active_conversation_id()
+
+                # Execute the tool calls
+                tool_results = self._execute_tool_calls(
+                    accumulated_tool_calls, conversation_id, message_id
+                )
+
+                # Build assistant message with tool_calls for the API
+                assistant_tool_msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": accumulated_tool_calls,
+                }
+
+                # Extend messages with assistant tool call and results
+                messages.append(assistant_tool_msg)
+                messages.extend(tool_results)
+
+                # Make a follow-up API call with tool results (non-streaming for simplicity)
+                logger.info(
+                    f"[{thread_name}] 🔄 Making follow-up API call with tool results..."
+                )
+                follow_up_params = {
+                    "model": model_to_use,
+                    "messages": messages,
+                    "temperature": self.config.temperature,
+                }
+                if self.config.max_tokens is not None:
+                    follow_up_params["max_tokens"] = self.config.max_tokens
+                if self.available_tools:
+                    follow_up_params["tools"] = self.available_tools
+
+                try:
+                    follow_up_response = self.client.chat.completions.create(
+                        **follow_up_params
+                    )
+                    follow_up_content = (
+                        follow_up_response.choices[0].message.content or ""
+                    )
+
+                    logger.info(
+                        f"[{thread_name}] ✓ Follow-up response received ({len(follow_up_content)} chars)"
+                    )
+
+                    # Add follow-up response to full_response_text for TTS
+                    if follow_up_content.strip():
+                        full_response_text += "\n" + follow_up_content
+
+                        # Send follow-up response to Broca for TTS
+                        chunks_sent += 1
+                        follow_up_chunk = {
+                            "text": strip_markdown(follow_up_content),
+                            "id": f"{message_id}_follow_up",
+                            "prompt_id": message_id,
+                            "model": model_to_use,
+                            "is_chunk": True,
+                            "chunk_number": chunks_sent,
+                            "is_final": True,
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                        logger.info(
+                            f"[{thread_name}] 📤 Sending follow-up response to Broca"
+                        )
+                        self.producer.send(
+                            self.config.kafka_output_topic, value=follow_up_chunk
+                        )
+
+                        # Store follow-up response in chat history
+                        if self.chat_store is not None and conversation_id:
+                            try:
+                                self.chat_store.add_assistant_message(
+                                    conversation_id, follow_up_content
+                                )
+                                logger.info(
+                                    f"[{thread_name}] 💬 Stored follow-up response in chat history"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"[{thread_name}] ⚠ Failed to store follow-up: {e}"
+                                )
+
+                except Exception as e:
+                    logger.error(f"[{thread_name}] ✗ Follow-up API call failed: {e}")
+                    # Send error message to Broca
+                    error_msg = f"Tool execution completed but follow-up failed: {e}"
+                    self.producer.send(
+                        self.config.kafka_output_topic,
+                        value={
+                            "text": error_msg,
+                            "id": f"{message_id}_error",
+                            "prompt_id": message_id,
+                            "is_error": True,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
 
             # Extract and log thinking block statistics from full response
             cleaned_text, thinking_blocks = extract_thinking_blocks(full_response_text)
@@ -1620,6 +1962,20 @@ User's question: {prompt}"""
         logger.info("Checking tool call support...")
         tools_supported = self.check_tool_support()
         logger.info(f"Tool call support: {'YES' if tools_supported else 'NO'}")
+
+        # Discover available AI tools if tool calls are supported
+        if tools_supported:
+            logger.info("Discovering AI tools...")
+            self.available_tools = self.tool_client.discover_tools()
+            if self.available_tools:
+                tool_names = [t["function"]["name"] for t in self.available_tools]
+                logger.info(
+                    f"Discovered {len(self.available_tools)} tools: {tool_names}"
+                )
+            else:
+                logger.info("No AI tools available (none configured or healthy)")
+        else:
+            logger.info("Skipping tool discovery (tool calls not supported)")
         logger.info("=" * 60)
 
         message_count = 0

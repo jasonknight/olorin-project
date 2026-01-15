@@ -421,6 +421,123 @@ let broca_keys = state.keys(Some("broca."))?;
 
 **Thread Safety**: The State class uses thread-local SQLite connections with WAL mode for safe concurrent access from multiple threads and processes.
 
+### Slash Command System vs AI Tool Use
+
+The project has two distinct systems for executing functions - these are **NOT** connected:
+
+#### Slash Command System (User-Invoked)
+
+For commands triggered by the user via the chat client (e.g., `/stop`, `/write`, `/clear`).
+
+**Components**:
+- `libs/control_handlers/` - Pluggable handler modules (Python)
+- `libs/control_server.py` - HTTP API server exposing handlers
+- `cortex/controller.py` - Runs the control server process
+
+**How it works**:
+1. User types `/command` in chat client
+2. Chat client calls control server HTTP API (`POST /execute`)
+3. Server routes to appropriate handler module
+4. Handler executes and returns result
+
+**Existing handlers**: `stop-audio`, `resume-audio`, `audio-status`, `write`, `clear`
+
+**Configuration** (in `settings.json` `control` section):
+```json
+{
+  "control": {
+    "api": {
+      "enabled": true,
+      "port": 8765,
+      "host": "0.0.0.0"
+    }
+  }
+}
+```
+
+#### AI Tool Use (Model-Invoked)
+
+For functions the AI model can call during inference (OpenAI function calling). Tools are standalone HTTP servers that can be written in any language.
+
+**Architecture**:
+```
+[Cortex Consumer]
+     |
+     | 1. On startup: GET /describe from each enabled tool
+     | 2. Convert to OpenAI format, pass in API requests
+     | 3. When AI returns tool_calls, POST /call to tool
+     | 4. Store in chat history, send result back to AI
+     |
+[Tool Servers] (persistent HTTP servers)
+  - GET  /health   → {"status": "ok"}
+  - GET  /describe → tool metadata
+  - POST /call     → execute and return result
+```
+
+**Components**:
+- `tools/<name>/` - Tool server implementations (Rust or Python)
+- `libs/tool_client.py` - Client for tool server communication
+- `cortex/consumer.py` - Integrates tools into AI inference loop
+
+**Tool Protocol**:
+
+`GET /health`:
+```json
+{"status": "ok"}
+```
+
+`GET /describe`:
+```json
+{
+  "name": "write",
+  "description": "Write content to a file in ~/Documents/AI_OUT",
+  "parameters": [
+    {"name": "content", "type": "string", "required": true, "description": "..."},
+    {"name": "filename", "type": "string", "required": true, "description": "..."}
+  ]
+}
+```
+
+`POST /call`:
+```json
+// Request
+{"content": "Hello", "filename": "test.txt"}
+
+// Response (success)
+{"success": true, "result": "Wrote 5 bytes to ~/Documents/AI_OUT/test.txt"}
+
+// Response (error)
+{"success": false, "error": {"type": "IOError", "message": "Permission denied"}}
+```
+
+**Configuration** (in `settings.json` `tools` section):
+```json
+{
+  "tools": {
+    "write": {
+      "enabled": true,
+      "port": 8770
+    }
+  }
+}
+```
+
+**Existing Tools**:
+- `write` (Rust, port 8770) - Write files to ~/Documents/AI_OUT
+
+**Creating New Tools**:
+1. Create `tools/<name>/` directory
+2. Implement HTTP server with `/health`, `/describe`, `/call` endpoints
+3. Add tool to `settings.json` under `tools` section
+4. Tool will be auto-discovered and started by `./up`
+
+**State keys** (for tool support detection):
+- `cortex.tools_supported` - Whether current model supports tools (bool)
+- `cortex.tools_model` - Model name when tool support was checked (string)
+- `cortex.tools_checked_at` - Timestamp of last check (ISO string)
+- `tools.<name>.status` - Tool server status (string)
+- `tools.<name>.port` - Tool server port (int)
+
 ### Process Management
 
 Background processes are managed via the orchestration scripts:

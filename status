@@ -11,10 +11,13 @@ from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 
+import requests
+
 # Add project root to path for libs import
 sys.path.insert(0, str(Path(__file__).parent))
 
 from libs.state import get_state
+from libs.config import Config
 
 
 # ANSI color codes
@@ -263,6 +266,80 @@ def check_state():
     return state_info
 
 
+def check_tool_servers():
+    """Check status of AI tool servers via HTTP health endpoints."""
+    tool_info = []
+
+    try:
+        config = Config()
+        tools = config.get_tools()
+
+        for name, tool_config in tools.items():
+            port = tool_config.get("port")
+            if not port:
+                continue
+
+            info = {
+                "name": name,
+                "port": port,
+                "healthy": False,
+                "status": "unknown",
+                "description": None,
+            }
+
+            # Check health endpoint
+            try:
+                health_resp = requests.get(f"http://localhost:{port}/health", timeout=2)
+                if health_resp.status_code == 200:
+                    data = health_resp.json()
+                    if data.get("status") == "ok":
+                        info["healthy"] = True
+                        info["status"] = "healthy"
+
+                        # Get description from /describe
+                        try:
+                            desc_resp = requests.get(
+                                f"http://localhost:{port}/describe", timeout=2
+                            )
+                            if desc_resp.status_code == 200:
+                                desc_data = desc_resp.json()
+                                info["description"] = desc_data.get("description", "")[
+                                    :50
+                                ]
+                        except Exception:
+                            pass
+                    else:
+                        info["status"] = "unhealthy"
+                else:
+                    info["status"] = f"HTTP {health_resp.status_code}"
+            except requests.ConnectionError:
+                info["status"] = "not running"
+            except requests.Timeout:
+                info["status"] = "timeout"
+            except Exception as e:
+                info["status"] = f"error: {str(e)[:30]}"
+
+            tool_info.append(info)
+
+    except Exception as e:
+        # Config not available, check for tool PIDs as fallback
+        pids_dir = Path(".pids")
+        if pids_dir.exists():
+            for pid_file in pids_dir.glob("tool-*.pid"):
+                name = pid_file.stem.replace("tool-", "")
+                tool_info.append(
+                    {
+                        "name": name,
+                        "port": "?",
+                        "healthy": False,
+                        "status": f"config error: {str(e)[:20]}",
+                        "description": None,
+                    }
+                )
+
+    return tool_info
+
+
 def analyze_logs(tail_lines=50):
     """Analyze log files for errors and warnings."""
     logs_dir = Path("logs")
@@ -359,6 +436,31 @@ def print_processes(processes):
             f"  {icon}  {proc['name']:<30} "
             f"{status_color}{pid_str:<8}{Color.NC} "
             f"{proc['uptime']:<12} {proc['memory']:<10}"
+        )
+
+
+def print_tool_servers(tools):
+    """Print tool server status table."""
+    print_section("AI Tool Servers")
+
+    if not tools:
+        print(f"  {Color.YELLOW}No AI tools configured{Color.NC}")
+        return
+
+    # Header
+    print(f"  {'':2} {'Name':<15} {'Port':<8} {'Status':<15} {'Description'}")
+    print(f"  {'-' * 76}")
+
+    # Rows
+    for tool in tools:
+        icon = get_status_icon(tool["healthy"])
+        status_color = Color.GREEN if tool["healthy"] else Color.RED
+        desc = tool["description"] or ""
+        print(
+            f"  {icon}  {tool['name']:<15} "
+            f"{tool['port']:<8} "
+            f"{status_color}{tool['status']:<15}{Color.NC} "
+            f"{desc}"
         )
 
 
@@ -546,6 +648,7 @@ def main():
         print(f"{Color.CYAN}Gathering system information...{Color.NC}")
         containers = check_containers()
         processes = check_processes()
+        tool_servers = check_tool_servers()
         log_analysis = analyze_logs()
         state_info = check_state()
 
@@ -553,6 +656,7 @@ def main():
         print_state_info(state_info)
         print_containers(containers)
         print_processes(processes)
+        print_tool_servers(tool_servers)
         print_log_health(log_analysis)
         print_summary(containers, processes, log_analysis, state_info)
 

@@ -121,6 +121,46 @@ start_daemon() {
     update_state "${name}.status" "running" "string"
 }
 
+# Function to start a Rust tool server
+start_rust_tool() {
+    local name=$1
+    local port=$2
+    local dir="tools/${name}"
+
+    echo -e "${YELLOW}Starting ${name} tool server...${NC}"
+
+    cd "$SCRIPT_DIR"
+
+    if [ ! -f "${dir}/Cargo.toml" ]; then
+        echo -e "${RED}No Cargo.toml found for ${name} tool, skipping${NC}"
+        return 1
+    fi
+
+    # Check if binary exists, build if not
+    local binary="${dir}/target/release/${name}"
+    if [ ! -f "$binary" ]; then
+        echo -e "${YELLOW}Building ${name} tool (this may take a moment)...${NC}"
+        (cd "${dir}" && cargo build --release > "../logs/tool-${name}-build.log" 2>&1)
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to build ${name} tool${NC}"
+            return 1
+        fi
+    fi
+
+    # Start the tool server
+    nohup "$binary" --port "$port" > "logs/tool-${name}.log" 2>&1 &
+    local pid=$!
+    echo $pid > ".pids/tool-${name}.pid"
+    echo -e "${GREEN}Started ${name} tool server (PID: $pid, port: $port)${NC}"
+
+    # Update state database
+    update_state "system.pids.tool-${name}" "$pid" "int"
+    update_state "tools.${name}.status" "running" "string"
+    update_state "tools.${name}.port" "$port" "int"
+
+    return 0
+}
+
 # 1. Start Broca (Kafka)
 echo -e "\n${GREEN}=== Starting Broca (Kafka) ===${NC}"
 cd broca
@@ -184,7 +224,16 @@ update_state "containers.chromadb.port" "8000" "int"
 # 3. Start Exo (AI inference)
 echo -e "\n${GREEN}=== Starting Exo (AI Inference) ===${NC}"
 
-# 4. Start all consumer and tracking scripts
+# 4. Start AI tool servers (before consumers so tools are available for discovery)
+echo -e "\n${GREEN}=== Starting AI Tool Servers ===${NC}"
+
+# Start the write tool server
+start_rust_tool "write" "8770"
+
+# Give tool servers a moment to start
+sleep 1
+
+# 5. Start all consumer and tracking scripts
 echo -e "\n${GREEN}=== Starting Consumer Scripts ===${NC}"
 
 # Start Cortex consumer

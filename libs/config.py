@@ -78,6 +78,9 @@ _KEY_TO_PATH = {
     "CONTROL_API_ENABLED": "control.api.enabled",
     "CONTROL_API_PORT": "control.api.port",
     "CONTROL_API_HOST": "control.api.host",
+    # Tools (AI tool use)
+    "TOOLS_WRITE_ENABLED": "tools.write.enabled",
+    "TOOLS_WRITE_PORT": "tools.write.port",
 }
 
 
@@ -461,6 +464,28 @@ class Config:
 
         # Parse comma-separated string
         return [v.strip() for v in str(value).split(",")]
+
+    def get_tools(self) -> dict[str, dict[str, Any]]:
+        """
+        Get all enabled AI tools with their configuration.
+
+        Returns a dict mapping tool names to their configuration.
+        Only includes tools where 'enabled' is True.
+
+        Returns:
+            Dict like {'write': {'enabled': True, 'port': 8770}}
+        """
+        tools_section = self._get_nested("tools")
+        if not isinstance(tools_section, dict):
+            return {}
+
+        result = {}
+        for tool_name, tool_config in tools_section.items():
+            if isinstance(tool_config, dict):
+                enabled = tool_config.get("enabled", False)
+                if enabled:
+                    result[tool_name] = tool_config
+        return result
 
     def set(self, key: str, value: Any) -> None:
         """

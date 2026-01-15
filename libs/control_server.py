@@ -1,9 +1,15 @@
 """
-Control API Server for Olorin Project
+Slash Command API Server for Olorin Project
 
-HTTP JSON API server for cross-language command execution.
+HTTP JSON API server for cross-language slash command execution.
 Exposes control handlers as slash commands that can be queried
 and executed from any language (e.g., Rust chat client).
+
+NOTE: This server is for USER-INVOKED SLASH COMMANDS (e.g., /stop, /write, /clear)
+triggered by the user via the chat client. This is SEPARATE from AI tool use, which
+allows the AI model to call functions during inference. Tool use is handled in
+cortex/consumer.py by passing tool definitions to the OpenAI API and processing
+tool_calls in responses.
 
 Endpoints:
     GET  /commands          - List all available commands with metadata

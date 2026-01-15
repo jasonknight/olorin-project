@@ -1,0 +1,19 @@
+[package]
+name = "write"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "AI Tool Server: Write files to ~/Documents/AI_OUT"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+[profile.release]
+lto = true
+strip = true

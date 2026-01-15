@@ -1,8 +1,14 @@
 """
-Control Handler Discovery and Dispatch System for Olorin Project
+Slash Command Handler Discovery and Dispatch System for Olorin Project
 
-This module provides automatic discovery and registration of control handlers.
+This module provides automatic discovery and registration of slash command handlers.
 Each handler is a Python module with a `handle(payload: dict) -> dict` function.
+
+NOTE: This system is for USER-INVOKED SLASH COMMANDS (e.g., /stop, /write, /clear)
+triggered by the user via the chat client. This is SEPARATE from AI tool use, which
+allows the AI model to call functions during inference. Tool use integration (passing
+tool definitions to the OpenAI API and handling tool_calls in responses) is handled
+elsewhere in cortex/consumer.py.
 
 Handlers can optionally define metadata for slash command exposure:
     DESCRIPTION: str - Human-readable description of the command
@@ -21,14 +27,14 @@ Usage:
     handlers = discover_handlers()
 
     # Get a specific handler
-    handler = get_handler("stop-broca-audio-play")
+    handler = get_handler("stop-audio")
     result = handler({"force": True})
 
     # List available commands
     commands = list_commands()
 
     # Get metadata for slash command integration
-    meta = get_command_meta("stop-broca-audio-play")
+    meta = get_command_meta("stop-audio")
     all_meta = get_all_commands_meta()
 """
 

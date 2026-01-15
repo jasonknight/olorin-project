@@ -522,7 +522,6 @@ fn parse_inline_markdown(
 fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
     use ratatui::text::Line as TextLine;
     use ratatui::text::Text;
-    use ratatui::widgets::Wrap;
 
     let block = Block::default()
         .title(" Input ")
@@ -539,65 +538,134 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
     let text_style = Style::default().fg(Color::White);
     let ghost_style = Style::default().fg(Color::DarkGray);
 
-    // Build display text - handle ghost completion on single-line input only
-    let display_text: Text = if lines.is_empty() {
-        // Empty input
-        Text::from("")
-    } else if lines.len() == 1 {
-        if let Some(ref completion) = app.completion {
-            // Single line with ghost completion
-            let spans = vec![
-                Span::styled(lines[0].clone(), text_style),
-                Span::styled(completion.clone(), ghost_style),
-            ];
-            Text::from(TextLine::from(spans))
-        } else {
-            // Single line without completion
-            Text::from(lines[0].as_str()).style(text_style)
-        }
-    } else {
-        // Multi-line: render each line separately, no ghost text
-        let styled_lines: Vec<TextLine> = lines
-            .iter()
-            .map(|line| TextLine::from(Span::styled(line.clone(), text_style)))
-            .collect();
-        Text::from(styled_lines)
-    };
-
-    // Use Paragraph with word wrapping
-    let paragraph = Paragraph::new(display_text).wrap(Wrap { trim: false });
-
-    frame.render_widget(paragraph, inner);
-
-    // Calculate cursor position in wrapped text
-    // We need to figure out where the cursor lands after wrapping
+    // Calculate wrap width for manual character-based wrapping
     let wrap_width = inner.width as usize;
     if wrap_width == 0 {
         return;
     }
 
-    // Calculate visual cursor position
+    // Manually wrap text at exact character boundaries to match cursor calculation
+    // This ensures the visual cursor position matches the rendered text
+    fn wrap_line(line: &str, width: usize) -> Vec<String> {
+        if line.is_empty() || width == 0 {
+            return vec![line.to_string()];
+        }
+        let mut wrapped = Vec::new();
+        let mut current = String::new();
+        let mut current_width = 0;
+
+        for ch in line.chars() {
+            // Use unicode width for proper character width calculation
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if current_width + ch_width > width && !current.is_empty() {
+                wrapped.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+        if !current.is_empty() || wrapped.is_empty() {
+            wrapped.push(current);
+        }
+        wrapped
+    }
+
+    // Build pre-wrapped display text
+    let wrapped_display: Text = if lines.is_empty() {
+        Text::from("")
+    } else if lines.len() == 1 {
+        // Single line - may have ghost completion
+        let full_line = if let Some(ref completion) = app.completion {
+            format!("{}{}", lines[0], completion)
+        } else {
+            lines[0].to_string()
+        };
+        let wrapped_parts = wrap_line(&full_line, wrap_width);
+        let user_char_count = lines[0].chars().count();
+
+        // Build styled lines, handling the transition from user text to ghost text
+        let styled_lines: Vec<TextLine> = wrapped_parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| {
+                // Calculate character offset at start of this wrapped line
+                let start_offset: usize =
+                    wrapped_parts[..i].iter().map(|s| s.chars().count()).sum();
+                let part_char_count = part.chars().count();
+
+                if app.completion.is_some() {
+                    // Determine where user text ends within this line
+                    if start_offset >= user_char_count {
+                        // Entire line is ghost text
+                        TextLine::from(Span::styled(part.clone(), ghost_style))
+                    } else if start_offset + part_char_count <= user_char_count {
+                        // Entire line is user text
+                        TextLine::from(Span::styled(part.clone(), text_style))
+                    } else {
+                        // Mixed: part user text, part ghost text
+                        let user_chars_in_line = user_char_count - start_offset;
+                        let (user_part, ghost_part): (String, String) = {
+                            let chars: Vec<char> = part.chars().collect();
+                            (
+                                chars[..user_chars_in_line].iter().collect(),
+                                chars[user_chars_in_line..].iter().collect(),
+                            )
+                        };
+                        TextLine::from(vec![
+                            Span::styled(user_part, text_style),
+                            Span::styled(ghost_part, ghost_style),
+                        ])
+                    }
+                } else {
+                    TextLine::from(Span::styled(part.clone(), text_style))
+                }
+            })
+            .collect();
+        Text::from(styled_lines)
+    } else {
+        // Multi-line: wrap each line separately, no ghost text
+        let mut all_lines: Vec<TextLine> = Vec::new();
+        for line in lines.iter() {
+            let wrapped_parts = wrap_line(line, wrap_width);
+            for part in wrapped_parts {
+                all_lines.push(TextLine::from(Span::styled(part, text_style)));
+            }
+        }
+        Text::from(all_lines)
+    };
+
+    // Render pre-wrapped text without additional wrapping
+    let paragraph = Paragraph::new(wrapped_display);
+    frame.render_widget(paragraph, inner);
+
+    // Calculate visual cursor position using the same wrapping logic
     let mut visual_row: u16 = 0;
     let mut visual_col: u16 = 0;
 
     for (line_idx, line) in lines.iter().enumerate() {
+        let wrapped_parts = wrap_line(line, wrap_width);
+
         if line_idx < cursor_row {
             // Count how many visual rows this line takes
-            if line.is_empty() {
-                visual_row += 1;
-            } else {
-                let wrapped_count = line.len().div_ceil(wrap_width);
-                visual_row += wrapped_count.max(1) as u16;
-            }
+            visual_row += wrapped_parts.len() as u16;
         } else {
-            // This is the cursor line - find column position
-            if cursor_col == 0 {
-                visual_col = 0;
-            } else {
-                // Simple calculation: which wrapped line and column
-                let extra_rows = cursor_col / wrap_width;
-                visual_row += extra_rows as u16;
-                visual_col = (cursor_col % wrap_width) as u16;
+            // This is the cursor line - find cursor position within wrapped parts
+            let mut chars_remaining = cursor_col;
+            for (wrap_idx, part) in wrapped_parts.iter().enumerate() {
+                let part_char_count = part.chars().count();
+                if chars_remaining <= part_char_count {
+                    // Cursor is on this wrapped line
+                    visual_row += wrap_idx as u16;
+                    // Calculate visual column using unicode width
+                    visual_col = part
+                        .chars()
+                        .take(chars_remaining)
+                        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1) as u16)
+                        .sum();
+                    break;
+                }
+                chars_remaining -= part_char_count;
             }
             break;
         }

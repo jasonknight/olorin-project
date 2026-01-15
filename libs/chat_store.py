@@ -263,6 +263,71 @@ class ChatStore:
             conversation_id, "assistant", content, None, message_type, metadata
         )
 
+    def add_tool_call_message(
+        self,
+        conversation_id: str,
+        tool_calls: List[Dict[str, Any]],
+        prompt_id: Optional[str] = None,
+    ) -> str:
+        """
+        Add an assistant message containing tool calls.
+
+        This stores the assistant's decision to call tools. The content is empty
+        because the assistant is requesting tool execution rather than responding.
+
+        Args:
+            conversation_id: ID of the conversation
+            tool_calls: List of tool call objects from the API response, each with:
+                - id: The tool call ID
+                - function: {name: str, arguments: str (JSON)}
+                - type: "function"
+            prompt_id: Optional original Kafka message ID
+
+        Returns:
+            message_id (UUID string)
+        """
+        metadata = {"tool_calls": tool_calls}
+        return self._add_message(
+            conversation_id,
+            "assistant",
+            "",  # Content is empty for tool call messages
+            prompt_id,
+            "tool_call",
+            metadata,
+        )
+
+    def add_tool_result_message(
+        self,
+        conversation_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        result: str,
+    ) -> str:
+        """
+        Add a tool result message to the conversation.
+
+        This stores the result of executing a tool. The role is 'tool' which
+        indicates this is a tool response rather than a user or assistant message.
+
+        Args:
+            conversation_id: ID of the conversation
+            tool_call_id: The ID of the tool call this is responding to
+            tool_name: Name of the tool that was called
+            result: The result content (typically JSON string or text)
+
+        Returns:
+            message_id (UUID string)
+        """
+        metadata = {"tool_call_id": tool_call_id, "tool_name": tool_name}
+        return self._add_message(
+            conversation_id,
+            "tool",
+            result,
+            None,
+            "tool_result",
+            metadata,
+        )
+
     def _add_message(
         self,
         conversation_id: str,
@@ -395,6 +460,56 @@ class ChatStore:
                     pass  # Keep as string if not valid JSON
             rows.append(row_dict)
         return rows
+
+    def get_conversation_messages_for_api(self, conversation_id: str) -> List[Dict]:
+        """
+        Get messages formatted for OpenAI API calls.
+
+        Converts stored messages to the format expected by OpenAI's chat completions API,
+        including proper handling of tool calls and tool results.
+
+        Args:
+            conversation_id: ID of the conversation
+
+        Returns:
+            List of message dicts ready for API consumption
+        """
+        raw_messages = self.get_conversation_messages(conversation_id)
+        api_messages = []
+
+        for msg in raw_messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            metadata = msg.get("metadata", {})
+            message_type = msg.get("message_type", "message")
+
+            # Skip context injection messages (they're re-injected at query time)
+            if message_type in ("context_user", "context_ack"):
+                continue
+
+            if role == "tool":
+                # Tool result message
+                api_msg = {
+                    "role": "tool",
+                    "content": content,
+                    "tool_call_id": metadata.get("tool_call_id", ""),
+                }
+                api_messages.append(api_msg)
+            elif role == "assistant" and message_type == "tool_call":
+                # Assistant message with tool calls
+                tool_calls = metadata.get("tool_calls", [])
+                api_msg = {
+                    "role": "assistant",
+                    "content": content if content else None,
+                    "tool_calls": tool_calls,
+                }
+                api_messages.append(api_msg)
+            else:
+                # Regular user or assistant message
+                api_msg = {"role": role, "content": content}
+                api_messages.append(api_msg)
+
+        return api_messages
 
     # =========================================================================
     # Utility Methods
