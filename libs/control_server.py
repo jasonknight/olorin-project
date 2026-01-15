@@ -44,6 +44,54 @@ from libs.control_handlers import (
 logger = logging.getLogger(__name__)
 
 
+def _map_positional_to_named(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map positional arguments to named parameters based on ARGUMENTS metadata.
+
+    The Rust client passes positional arguments in a "_positional" array.
+    This function maps them to named parameters in order of ARGUMENTS definition.
+
+    Args:
+        command: The command name
+        payload: The payload dict, possibly containing "_positional" array
+
+    Returns:
+        Updated payload with positional args mapped to named parameters
+    """
+    if "_positional" not in payload:
+        return payload
+
+    positional = payload.get("_positional")
+    if not isinstance(positional, list) or len(positional) == 0:
+        # Strip _positional key but keep other keys
+        return {k: v for k, v in payload.items() if k != "_positional"}
+
+    try:
+        meta = get_command_meta(command)
+    except KeyError:
+        # Command not found, return payload as-is
+        return payload
+
+    # Create a copy to avoid modifying the original
+    result = {k: v for k, v in payload.items() if k != "_positional"}
+
+    # Map positional args to named parameters in order
+    for i, value in enumerate(positional):
+        if i < len(meta.arguments):
+            arg_name = meta.arguments[i].name
+            # Only set if not already provided as a named argument
+            if arg_name not in result:
+                result[arg_name] = value
+        else:
+            # More positional args than defined parameters - store remainder
+            # in "_extra" for handlers that might want them
+            if "_extra" not in result:
+                result["_extra"] = []
+            result["_extra"].append(value)
+
+    return result
+
+
 class ControlRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the control API."""
 
@@ -180,6 +228,9 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             self._send_error_response("'payload' must be an object")
             return
+
+        # Map positional arguments to named parameters based on ARGUMENTS metadata
+        payload = _map_positional_to_named(command, payload)
 
         # Execute the command
         start_time = time.time()

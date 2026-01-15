@@ -103,17 +103,23 @@ pub async fn execute_command(base_url: &str, command_text: &str) -> Result<Execu
         .context("Failed to parse control API response")
 }
 
-/// Parse simple key=value arguments into a JSON object
+/// Parse command arguments into a JSON object
 ///
 /// Supports:
 /// - key=value (string)
 /// - key=true/false (boolean)
 /// - key=123 (integer)
+/// - positional arguments (bare values without =)
+///
+/// Positional arguments are collected into a "_positional" array in order,
+/// allowing the server to map them to named parameters based on ARGUMENTS metadata.
 fn parse_arguments(args_str: &str) -> serde_json::Value {
     let mut map = serde_json::Map::new();
+    let mut positional: Vec<serde_json::Value> = Vec::new();
 
     for part in args_str.split_whitespace() {
         if let Some((key, value)) = part.split_once('=') {
+            // Named argument: key=value
             let json_value = if value == "true" {
                 serde_json::Value::Bool(true)
             } else if value == "false" {
@@ -124,7 +130,27 @@ fn parse_arguments(args_str: &str) -> serde_json::Value {
                 serde_json::Value::String(value.to_string())
             };
             map.insert(key.to_string(), json_value);
+        } else {
+            // Positional argument: bare value
+            let json_value = if part == "true" {
+                serde_json::Value::Bool(true)
+            } else if part == "false" {
+                serde_json::Value::Bool(false)
+            } else if let Ok(num) = part.parse::<i64>() {
+                serde_json::Value::Number(num.into())
+            } else {
+                serde_json::Value::String(part.to_string())
+            };
+            positional.push(json_value);
         }
+    }
+
+    // Add positional arguments if any were found
+    if !positional.is_empty() {
+        map.insert(
+            "_positional".to_string(),
+            serde_json::Value::Array(positional),
+        );
     }
 
     serde_json::Value::Object(map)
@@ -164,6 +190,48 @@ mod tests {
         assert_eq!(
             result,
             serde_json::json!({"name": "test", "force": true, "count": 5})
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_single_positional() {
+        let result = parse_arguments("myfile");
+        assert_eq!(result, serde_json::json!({"_positional": ["myfile"]}));
+    }
+
+    #[test]
+    fn test_parse_arguments_multiple_positional() {
+        let result = parse_arguments("first second third");
+        assert_eq!(
+            result,
+            serde_json::json!({"_positional": ["first", "second", "third"]})
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_positional_with_types() {
+        let result = parse_arguments("myfile 42 true");
+        assert_eq!(
+            result,
+            serde_json::json!({"_positional": ["myfile", 42, true]})
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_mixed_positional_and_named() {
+        let result = parse_arguments("myfile force=true count=5");
+        assert_eq!(
+            result,
+            serde_json::json!({"_positional": ["myfile"], "force": true, "count": 5})
+        );
+    }
+
+    #[test]
+    fn test_parse_arguments_named_then_positional() {
+        let result = parse_arguments("force=true myfile");
+        assert_eq!(
+            result,
+            serde_json::json!({"force": true, "_positional": ["myfile"]})
         );
     }
 }

@@ -25,7 +25,7 @@ from libs.control_handlers import (  # noqa: E402
     get_all_commands_meta,
     get_command_meta,
 )
-from libs.control_server import ControlServer  # noqa: E402
+from libs.control_server import ControlServer, _map_positional_to_named  # noqa: E402
 
 
 # =============================================================================
@@ -135,9 +135,9 @@ class TestMetadataDiscovery:
 
     def test_get_command_meta_returns_metadata(self):
         """Test that get_command_meta returns correct metadata."""
-        meta = get_command_meta("stop-broca-audio-play")
-        assert meta.command == "stop-broca-audio-play"
-        assert meta.slash_command == "/stop-broca-audio-play"
+        meta = get_command_meta("stop-audio")
+        assert meta.command == "stop-audio"
+        assert meta.slash_command == "/stop-audio"
         assert meta.description != ""  # Should have description
         assert len(meta.arguments) > 0  # Should have force argument
 
@@ -150,8 +150,8 @@ class TestMetadataDiscovery:
         """Test that get_all_commands_meta returns all metadata."""
         all_meta = get_all_commands_meta()
         assert isinstance(all_meta, dict)
-        assert "stop-broca-audio-play" in all_meta
-        assert isinstance(all_meta["stop-broca-audio-play"], CommandMeta)
+        assert "stop-audio" in all_meta
+        assert isinstance(all_meta["stop-audio"], CommandMeta)
 
 
 # =============================================================================
@@ -217,22 +217,19 @@ class TestCommandsEndpoint:
             assert isinstance(data["commands"], list)
             assert data["count"] == len(data["commands"])
 
-            # Check for stop-broca-audio-play
+            # Check for stop-audio
             commands = {c["command"]: c for c in data["commands"]}
-            assert "stop-broca-audio-play" in commands
-            assert (
-                commands["stop-broca-audio-play"]["slash_command"]
-                == "/stop-broca-audio-play"
-            )
+            assert "stop-audio" in commands
+            assert commands["stop-audio"]["slash_command"] == "/stop-audio"
 
     def test_get_specific_command(self, server, test_port):
         """Test that /commands/<name> returns specific command metadata."""
-        url = f"http://127.0.0.1:{test_port}/commands/stop-broca-audio-play"
+        url = f"http://127.0.0.1:{test_port}/commands/stop-audio"
         with urllib.request.urlopen(url, timeout=5) as response:
             data = json.loads(response.read().decode())
             assert data["success"] is True
-            assert data["command"]["command"] == "stop-broca-audio-play"
-            assert data["command"]["slash_command"] == "/stop-broca-audio-play"
+            assert data["command"]["command"] == "stop-audio"
+            assert data["command"]["slash_command"] == "/stop-audio"
 
     def test_get_unknown_command(self, server, test_port):
         """Test that /commands/<name> returns 404 for unknown command."""
@@ -257,7 +254,7 @@ class TestExecuteEndpoint:
         url = f"http://127.0.0.1:{test_port}/execute"
         request_body = json.dumps(
             {
-                "command": "stop-broca-audio-play",
+                "command": "stop-audio",
                 "payload": {"force": True},
             }
         ).encode()
@@ -272,7 +269,7 @@ class TestExecuteEndpoint:
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             assert data["success"] is True
-            assert data["command"] == "stop-broca-audio-play"
+            assert data["command"] == "stop-audio"
             assert data["result"] == mock_result
             assert "duration_ms" in data
 
@@ -341,7 +338,7 @@ class TestExecuteEndpoint:
         url = f"http://127.0.0.1:{test_port}/execute"
         request_body = json.dumps(
             {
-                "command": "stop-broca-audio-play",
+                "command": "stop-audio",
                 "payload": {},
             }
         ).encode()
@@ -367,3 +364,118 @@ class TestNotFoundEndpoint:
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(url, timeout=5)
         assert exc_info.value.code == 404
+
+
+# =============================================================================
+# Test positional argument mapping
+# =============================================================================
+
+
+class TestMapPositionalToNamed:
+    """Tests for _map_positional_to_named function."""
+
+    def test_no_positional_args(self):
+        """Test that payloads without _positional are returned unchanged."""
+        payload = {"name": "test", "force": True}
+        result = _map_positional_to_named("write", payload)
+        assert result == payload
+
+    def test_empty_positional_array(self):
+        """Test that empty _positional array is handled."""
+        payload = {"_positional": [], "force": True}
+        result = _map_positional_to_named("write", payload)
+        # Empty _positional should be stripped
+        assert "_positional" not in result
+        assert result == {"force": True}
+
+    def test_single_positional_arg(self):
+        """Test mapping a single positional argument."""
+        # write command has 'filename' as first argument
+        payload = {"_positional": ["myfile"]}
+        result = _map_positional_to_named("write", payload)
+        assert result == {"filename": "myfile"}
+        assert "_positional" not in result
+
+    def test_positional_does_not_override_named(self):
+        """Test that positional args don't override explicit named args."""
+        payload = {"_positional": ["positional_file"], "filename": "named_file"}
+        result = _map_positional_to_named("write", payload)
+        # Named argument takes precedence
+        assert result["filename"] == "named_file"
+        assert "_positional" not in result
+
+    def test_extra_positional_args(self):
+        """Test that extra positional args are stored in _extra."""
+        # write only has one argument (filename)
+        payload = {"_positional": ["file1", "file2", "file3"]}
+        result = _map_positional_to_named("write", payload)
+        assert result["filename"] == "file1"
+        assert result["_extra"] == ["file2", "file3"]
+        assert "_positional" not in result
+
+    def test_unknown_command(self):
+        """Test that unknown commands return payload without _positional."""
+        payload = {"_positional": ["value"]}
+        result = _map_positional_to_named("unknown-command", payload)
+        # Should return original payload since command not found
+        assert result == payload
+
+    def test_command_with_no_arguments(self):
+        """Test command with no defined arguments."""
+        # clear command has no arguments
+        payload = {"_positional": ["unexpected"]}
+        result = _map_positional_to_named("clear", payload)
+        # All positional args go to _extra since no ARGUMENTS defined
+        assert result["_extra"] == ["unexpected"]
+        assert "_positional" not in result
+
+    def test_preserves_other_keys(self):
+        """Test that other payload keys are preserved."""
+        payload = {"_positional": ["myfile"], "other_key": "value", "number": 42}
+        result = _map_positional_to_named("write", payload)
+        assert result == {"filename": "myfile", "other_key": "value", "number": 42}
+
+    def test_mixed_positional_and_named(self):
+        """Test payload with both positional and named args."""
+        # stop-audio has 'force' argument
+        payload = {"_positional": [True], "other": "value"}
+        result = _map_positional_to_named("stop-audio", payload)
+        assert result["force"] is True
+        assert result["other"] == "value"
+        assert "_positional" not in result
+
+
+class TestPositionalArgsIntegration:
+    """Integration tests for positional argument handling through the API."""
+
+    def test_execute_with_positional_args(self, server, test_port, mocker):
+        """Test that positional args are correctly mapped when executing commands."""
+        mock_handler = mocker.Mock(
+            return_value={"success": True, "received_filename": "testfile"}
+        )
+        mocker.patch("libs.control_server.get_handler", return_value=mock_handler)
+
+        url = f"http://127.0.0.1:{test_port}/execute"
+        request_body = json.dumps(
+            {
+                "command": "write",
+                "payload": {"_positional": ["testfile"]},
+            }
+        ).encode()
+
+        req = urllib.request.Request(
+            url,
+            data=request_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            assert data["success"] is True
+
+        # Verify handler was called with mapped argument
+        mock_handler.assert_called_once()
+        call_payload = mock_handler.call_args[0][0]
+        assert call_payload.get("filename") == "testfile"
+        assert "_positional" not in call_payload

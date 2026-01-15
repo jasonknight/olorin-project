@@ -250,14 +250,6 @@ impl<'a> App<'a> {
         self.messages.len()
     }
 
-    /// Check if the given text is a known slash command
-    pub fn is_slash_command(&self, text: &str) -> bool {
-        let text = text.trim();
-        self.slash_commands.iter().any(|cmd| {
-            text == cmd.slash_command || text.starts_with(&format!("{} ", cmd.slash_command))
-        })
-    }
-
     /// Find completion for partial slash command input
     ///
     /// Returns the portion of the command to append (ghost text),
@@ -298,6 +290,9 @@ impl<'a> App<'a> {
         self.is_sending = true;
         self.status = String::from("Executing command...");
 
+        // Extract command name for special handling
+        let command_name = text.split_whitespace().next().unwrap_or("");
+
         match api::execute_command(&self.control_api_url, text).await {
             Ok(response) => {
                 if response.success {
@@ -309,6 +304,11 @@ impl<'a> App<'a> {
                         }
                     } else {
                         self.status = String::from("Command executed successfully");
+                    }
+
+                    // Clear the display when /clear command succeeds
+                    if command_name == "/clear" {
+                        self.messages.clear();
                     }
                 } else {
                     self.status = format!(
@@ -328,6 +328,13 @@ impl<'a> App<'a> {
             }
             Err(e) => {
                 self.status = format!("Command error: {}", e);
+                // Still clear the input on error
+                self.input = TextArea::default();
+                self.input
+                    .set_cursor_line_style(ratatui::style::Style::default());
+                self.input
+                    .set_placeholder_text("Type your message... (Enter to send, Esc to quit)");
+                self.completion = None;
             }
         }
 

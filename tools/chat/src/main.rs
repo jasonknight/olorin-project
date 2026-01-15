@@ -109,7 +109,8 @@ async fn run_event_loop(
                     (KeyCode::Enter, KeyModifiers::NONE) => {
                         let text: String = app.input.lines().join("\n").trim().to_string();
                         if !text.is_empty() {
-                            if app.is_slash_command(&text) {
+                            // Any text starting with / is a slash command - never send to model
+                            if text.starts_with('/') {
                                 app.execute_slash_command(&text).await;
                             } else {
                                 app.send_message().await;
