@@ -18,6 +18,9 @@ pub struct FailedChromaDbConfig {
 /// How often to check ChromaDB health (in ticks)
 const HEALTH_CHECK_INTERVAL: u64 = 30; // ~7.5 seconds at 250ms tick rate
 
+/// How often to refresh record counts (in ticks)
+const COUNT_REFRESH_INTERVAL: u64 = 20; // ~5 seconds at 250ms tick rate
+
 /// Maximum number of records to keep in memory
 const MAX_RECORDS_IN_MEMORY: usize = 500;
 
@@ -516,6 +519,21 @@ impl App {
         // Periodic health check for network-based databases
         if self.tick_count % HEALTH_CHECK_INTERVAL == 0 {
             self.check_database_health();
+        }
+
+        // Periodic count refresh for all databases
+        if self.tick_count % COUNT_REFRESH_INTERVAL == 0 {
+            self.refresh_database_counts();
+        }
+    }
+
+    /// Refresh record counts for all databases
+    fn refresh_database_counts(&mut self) {
+        for db in &mut self.databases {
+            // Only refresh if database is available
+            if db.info().connection_state.is_available() {
+                let _ = db.refresh_count();
+            }
         }
     }
 
