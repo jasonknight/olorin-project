@@ -7,7 +7,10 @@ Splits markdown files intelligently based on headers and paragraphs.
 from typing import List, Dict, Tuple, Optional
 import re
 import logging
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +25,7 @@ class MarkdownChunker:
         self,
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
-        min_chunk_size: int = 100
+        min_chunk_size: int = 100,
     ):
         """
         Initialize markdown chunker.
@@ -63,16 +66,16 @@ class MarkdownChunker:
             If no frontmatter found, returns (None, original_content)
         """
         # Check if content starts with YAML frontmatter delimiter
-        if not content.startswith('---'):
+        if not content.startswith("---"):
             return None, content
 
         # Find the closing delimiter
         # Look for second occurrence of '---' on its own line
-        lines = content.split('\n')
+        lines = content.split("\n")
         frontmatter_end = -1
 
         for i in range(1, len(lines)):
-            if lines[i].strip() == '---':
+            if lines[i].strip() == "---":
                 frontmatter_end = i
                 break
 
@@ -82,11 +85,10 @@ class MarkdownChunker:
 
         # Extract frontmatter content (between delimiters)
         frontmatter_lines = lines[1:frontmatter_end]
-        frontmatter_text = '\n'.join(frontmatter_lines)
 
         # Extract content after frontmatter
-        content_lines = lines[frontmatter_end + 1:]
-        remaining_content = '\n'.join(content_lines)
+        content_lines = lines[frontmatter_end + 1 :]
+        remaining_content = "\n".join(content_lines)
 
         # Parse YAML manually (simple key-value parsing)
         metadata = {}
@@ -96,7 +98,7 @@ class MarkdownChunker:
 
         for line in frontmatter_lines:
             # Check for list items
-            if line.strip().startswith('- '):
+            if line.strip().startswith("- "):
                 if in_list:
                     # Extract value from list item: - "value" or - value
                     value = line.strip()[2:].strip()
@@ -107,35 +109,37 @@ class MarkdownChunker:
                 continue
 
             # Check for key-value pairs
-            if ':' in line:
+            if ":" in line:
                 # Save previous list if any
                 if in_list and current_key:
                     metadata[current_key] = current_list
                     current_list = []
                     in_list = False
 
-                key, value = line.split(':', 1)
+                key, value = line.split(":", 1)
                 key = key.strip()
                 value = value.strip()
 
                 # Check if this starts a list
-                if value == '' or value == '[]':
+                if value == "" or value == "[]":
                     in_list = True
                     current_key = key
                     current_list = []
-                    if value == '[]':
+                    if value == "[]":
                         # Empty list notation
                         metadata[key] = []
                         in_list = False
                     continue
 
                 # Check if value is a list in bracket notation: ["item1", "item2"]
-                if value.startswith('[') and value.endswith(']'):
+                if value.startswith("[") and value.endswith("]"):
                     # Parse bracket list
                     list_content = value[1:-1]
                     if list_content:
-                        items = [item.strip().strip('"').strip("'")
-                                for item in list_content.split(',')]
+                        items = [
+                            item.strip().strip('"').strip("'")
+                            for item in list_content.split(",")
+                        ]
                         metadata[key] = items
                     else:
                         metadata[key] = []
@@ -173,10 +177,14 @@ class MarkdownChunker:
 
         try:
             # Parse YAML frontmatter if present
-            document_metadata, content_without_frontmatter = self._parse_yaml_frontmatter(content)
+            document_metadata, content_without_frontmatter = (
+                self._parse_yaml_frontmatter(content)
+            )
 
             if document_metadata:
-                logger.info(f"Extracted document metadata from {source_file}: {list(document_metadata.keys())}")
+                logger.info(
+                    f"Extracted document metadata from {source_file}: {list(document_metadata.keys())}"
+                )
             else:
                 document_metadata = {}
 
@@ -186,7 +194,7 @@ class MarkdownChunker:
             # First pass: Split by markdown headers
             header_splitter = MarkdownHeaderTextSplitter(
                 headers_to_split_on=self.headers_to_split,
-                strip_headers=False  # Keep headers in chunks for context
+                strip_headers=False,  # Keep headers in chunks for context
             )
 
             header_splits = header_splitter.split_text(content_to_chunk)
@@ -198,17 +206,17 @@ class MarkdownChunker:
                 length_function=len,
                 separators=[
                     "\n\n",  # Paragraph breaks
-                    "\n",    # Line breaks
-                    ". ",    # Sentences
-                    " ",     # Words
-                    ""       # Characters
-                ]
+                    "\n",  # Line breaks
+                    ". ",  # Sentences
+                    " ",  # Words
+                    "",  # Characters
+                ],
             )
 
             chunks = []
             for idx, doc in enumerate(header_splits):
                 # Get header hierarchy from metadata
-                headers = doc.metadata if hasattr(doc, 'metadata') else {}
+                headers = doc.metadata if hasattr(doc, "metadata") else {}
 
                 # Split large sections further
                 if len(doc.page_content) > self.chunk_size:
@@ -219,7 +227,10 @@ class MarkdownChunker:
                 # Create chunk dictionaries with metadata
                 for sub_idx, chunk_text in enumerate(sub_chunks):
                     # Skip tiny chunks unless they're the only content
-                    if len(chunk_text.strip()) < self.min_chunk_size and len(sub_chunks) > 1:
+                    if (
+                        len(chunk_text.strip()) < self.min_chunk_size
+                        and len(sub_chunks) > 1
+                    ):
                         logger.debug(
                             f"Skipping small chunk ({len(chunk_text)} chars) "
                             f"from {source_file}"
@@ -228,11 +239,11 @@ class MarkdownChunker:
 
                     # Prepare chunk metadata
                     chunk_metadata = {
-                        'source': source_file,
-                        'chunk_index': len(chunks),
-                        'section_index': idx,
-                        'sub_index': sub_idx,
-                        'char_count': len(chunk_text.strip()),
+                        "source": source_file,
+                        "chunk_index": len(chunks),
+                        "section_index": idx,
+                        "sub_index": sub_idx,
+                        "char_count": len(chunk_text.strip()),
                         **headers,  # Include header hierarchy
                     }
 
@@ -241,14 +252,11 @@ class MarkdownChunker:
                     for key, value in document_metadata.items():
                         if isinstance(value, list):
                             # Convert list to comma-separated string
-                            chunk_metadata[key] = ', '.join(str(v) for v in value)
+                            chunk_metadata[key] = ", ".join(str(v) for v in value)
                         else:
                             chunk_metadata[key] = value
 
-                    chunk = {
-                        'text': chunk_text.strip(),
-                        'metadata': chunk_metadata
-                    }
+                    chunk = {"text": chunk_text.strip(), "metadata": chunk_metadata}
 
                     chunks.append(chunk)
 
@@ -271,24 +279,21 @@ class MarkdownChunker:
 
             # Prepare fallback metadata
             fallback_metadata = {
-                'source': source_file,
-                'chunk_index': 0,
-                'char_count': len(content.strip()),
-                'error': 'chunking_failed'
+                "source": source_file,
+                "chunk_index": 0,
+                "char_count": len(content.strip()),
+                "error": "chunking_failed",
             }
 
             # Add document metadata, converting lists to comma-separated strings
             for key, value in document_metadata.items():
                 if isinstance(value, list):
-                    fallback_metadata[key] = ', '.join(str(v) for v in value)
+                    fallback_metadata[key] = ", ".join(str(v) for v in value)
                 else:
                     fallback_metadata[key] = value
 
             # Fallback: create single chunk
-            return [{
-                'text': content.strip(),
-                'metadata': fallback_metadata
-            }]
+            return [{"text": content.strip(), "metadata": fallback_metadata}]
 
     def extract_title(self, content: str) -> str:
         """
@@ -301,12 +306,12 @@ class MarkdownChunker:
             Extracted title or empty string
         """
         # Look for first h1 header
-        match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+        match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
         if match:
             return match.group(1).strip()
 
         # Look for any header at start
-        match = re.search(r'^#{1,6}\s+(.+)$', content, re.MULTILINE)
+        match = re.search(r"^#{1,6}\s+(.+)$", content, re.MULTILINE)
         if match:
             return match.group(1).strip()
 
@@ -323,7 +328,7 @@ class MarkdownChunker:
         Returns:
             Preview string
         """
-        text = chunk['text']
+        text = chunk["text"]
         if len(text) <= max_length:
             return text
 

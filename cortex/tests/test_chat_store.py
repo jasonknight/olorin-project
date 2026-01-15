@@ -6,15 +6,13 @@ Tests conversation management, message storage, and history retrieval
 without requiring any external services.
 """
 
-import pytest
 import os
 import sys
 import sqlite3
 import threading
-from datetime import datetime
 
 # Add parent directories to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from libs.chat_store import ChatStore
 
@@ -25,20 +23,21 @@ class TestChatStoreInitialization:
     def test_creates_database_file(self, temp_db_path):
         """ChatStore should create database file if it doesn't exist."""
         assert not os.path.exists(temp_db_path)
-        store = ChatStore(temp_db_path)
+        ChatStore(temp_db_path)  # Creates the database
         assert os.path.exists(temp_db_path)
 
     def test_creates_parent_directory(self):
         """ChatStore should create parent directories if they don't exist."""
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            nested_path = os.path.join(tmpdir, 'a', 'b', 'c', 'chat.db')
-            store = ChatStore(nested_path)
+            nested_path = os.path.join(tmpdir, "a", "b", "c", "chat.db")
+            ChatStore(nested_path)  # Creates the database
             assert os.path.exists(nested_path)
 
     def test_creates_required_tables(self, temp_db_path):
         """ChatStore should create conversations and messages tables."""
-        store = ChatStore(temp_db_path)
+        ChatStore(temp_db_path)  # Creates the database
 
         conn = sqlite3.connect(temp_db_path)
         cursor = conn.execute(
@@ -47,22 +46,20 @@ class TestChatStoreInitialization:
         tables = [row[0] for row in cursor.fetchall()]
         conn.close()
 
-        assert 'conversations' in tables
-        assert 'messages' in tables
+        assert "conversations" in tables
+        assert "messages" in tables
 
     def test_creates_indexes(self, temp_db_path):
         """ChatStore should create performance indexes."""
-        store = ChatStore(temp_db_path)
+        ChatStore(temp_db_path)  # Creates the database
 
         conn = sqlite3.connect(temp_db_path)
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        )
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
         indexes = [row[0] for row in cursor.fetchall()]
         conn.close()
 
-        assert 'idx_messages_conversation_id' in indexes
-        assert 'idx_conversations_active' in indexes
+        assert "idx_messages_conversation_id" in indexes
+        assert "idx_conversations_active" in indexes
 
 
 class TestConversationManagement:
@@ -137,10 +134,10 @@ class TestMessageManagement:
     def test_add_user_message_with_prompt_id(self, chat_store):
         """Should store prompt_id with user message."""
         conv_id = chat_store.get_or_create_active_conversation()
-        msg_id = chat_store.add_user_message(conv_id, "Test", prompt_id="kafka_msg_123")
+        chat_store.add_user_message(conv_id, "Test", prompt_id="kafka_msg_123")
 
         messages = chat_store.get_conversation_messages(conv_id)
-        assert messages[0]['prompt_id'] == "kafka_msg_123"
+        assert messages[0]["prompt_id"] == "kafka_msg_123"
 
     def test_get_conversation_messages_empty(self, chat_store):
         """Should return empty list for conversation with no messages."""
@@ -159,12 +156,12 @@ class TestMessageManagement:
         messages = chat_store.get_conversation_messages(conv_id)
 
         assert len(messages) == 3
-        assert messages[0]['content'] == "First"
-        assert messages[0]['role'] == "user"
-        assert messages[1]['content'] == "Second"
-        assert messages[1]['role'] == "assistant"
-        assert messages[2]['content'] == "Third"
-        assert messages[2]['role'] == "user"
+        assert messages[0]["content"] == "First"
+        assert messages[0]["role"] == "user"
+        assert messages[1]["content"] == "Second"
+        assert messages[1]["role"] == "assistant"
+        assert messages[2]["content"] == "Third"
+        assert messages[2]["role"] == "user"
 
     def test_messages_have_required_fields(self, chat_store):
         """Each message should have all required fields."""
@@ -174,11 +171,11 @@ class TestMessageManagement:
         messages = chat_store.get_conversation_messages(conv_id)
         msg = messages[0]
 
-        assert 'id' in msg
-        assert 'conversation_id' in msg
-        assert 'role' in msg
-        assert 'content' in msg
-        assert 'created_at' in msg
+        assert "id" in msg
+        assert "conversation_id" in msg
+        assert "role" in msg
+        assert "content" in msg
+        assert "created_at" in msg
 
     def test_updates_conversation_message_count(self, chat_store):
         """Adding messages should update conversation message_count."""
@@ -188,7 +185,7 @@ class TestMessageManagement:
         chat_store.add_assistant_message(conv_id, "Two")
 
         stats = chat_store.get_statistics()
-        assert stats['total_messages'] == 2
+        assert stats["total_messages"] == 2
 
 
 class TestStatistics:
@@ -198,9 +195,9 @@ class TestStatistics:
         """Should return zero counts for empty database."""
         stats = chat_store.get_statistics()
 
-        assert stats['total_conversations'] == 0
-        assert stats['active_conversations'] == 0
-        assert stats['total_messages'] == 0
+        assert stats["total_conversations"] == 0
+        assert stats["active_conversations"] == 0
+        assert stats["total_messages"] == 0
 
     def test_get_statistics_with_data(self, chat_store):
         """Should return accurate counts with data."""
@@ -213,11 +210,11 @@ class TestStatistics:
 
         stats = chat_store.get_statistics()
 
-        assert stats['total_conversations'] == 2
-        assert stats['active_conversations'] == 1
-        assert stats['total_messages'] == 3
-        assert stats['user_messages'] == 2
-        assert stats['assistant_messages'] == 1
+        assert stats["total_conversations"] == 2
+        assert stats["active_conversations"] == 1
+        assert stats["total_messages"] == 3
+        assert stats["user_messages"] == 2
+        assert stats["assistant_messages"] == 1
 
     def test_get_conversation_count(self, chat_store):
         """Should return correct conversation count."""

@@ -176,6 +176,13 @@ impl DatabaseSource for SqliteFileTracker {
 
         let count = self.info.record_count;
         write_conn.execute("DELETE FROM processed_files", [])?;
+
+        // Re-open the read connection to see the changes
+        self.conn = Connection::open_with_flags(
+            &self.info.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
         self.info.record_count = 0;
         Ok(count)
     }
@@ -364,6 +371,13 @@ impl DatabaseSource for SqliteContext {
 
         let count = self.info.record_count;
         write_conn.execute("DELETE FROM contexts", [])?;
+
+        // Re-open the read connection to see the changes
+        self.conn = Connection::open_with_flags(
+            &self.info.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
         self.info.record_count = 0;
         Ok(count)
     }
@@ -534,6 +548,13 @@ impl DatabaseSource for SqliteChat {
         // Clear both tables (messages depend on conversations via foreign key)
         write_conn.execute("DELETE FROM messages", [])?;
         write_conn.execute("DELETE FROM conversations", [])?;
+
+        // Re-open the read connection to see the changes
+        self.conn = Connection::open_with_flags(
+            &self.info.path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+
         self.info.record_count = 0;
         Ok(count)
     }

@@ -40,6 +40,13 @@ Hippocampus (Knowledge Base)
 
 ## Common Commands
 
+### Linting and Formatting Code
+
+```
+# Run this command when you've written new code
+pre-commit run --all-files
+``` 
+
 ### Starting/Stopping the System
 
 ```bash
@@ -286,11 +293,14 @@ let patterns = config.get_list("CHAT_RESET_PATTERNS", None);
 - `config.get_int(key, default)` - Get integer value
 - `config.get_float(key, default)` - Get float value
 - `config.get_bool(key, default)` - Get boolean (native JSON bool or string: true/yes/1/on)
-- `config.get_path(key, default)` - Get path with ~ expansion
+- `config.get_path(key, default)` - Get absolute path (~ expanded, relative paths resolved against project root)
 - `config.get_list(key, default)` - Get list (native JSON array or comma-separated string)
 - `config.set(key, value)` - In-memory override
 - `config.reload()` - Hot-reload if file changed (returns True if reloaded)
+- `config.project_root` - Project root directory (where settings.json lives)
 - `config.config_path` - Path to active config file (settings.json or .env)
+
+**Path Resolution**: All relative paths in settings.json (e.g., `./cortex/data/chat.db`) are resolved against the project root, not the current working directory. This ensures consistent path resolution regardless of which directory a component runs from.
 
 **Backward Compatibility**: Flat keys like `CHROMADB_PORT` are automatically mapped to nested JSON paths like `hippocampus.chromadb.port`. Existing code using flat keys continues to work without changes.
 
@@ -321,6 +331,7 @@ When adding a new component:
 6. Update `./up` to start the daemon
 7. Update `./down` to stop the daemon
 8. Update `./status` to monitor the component
+9. Run `pre-commit run --all-files` to lint and format all files created or edited, and fix lints that show up.
 
 ### Kafka Topic Management
 

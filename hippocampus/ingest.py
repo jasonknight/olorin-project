@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 from datetime import datetime
 
 import chromadb
@@ -17,18 +17,18 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 from libs.olorin_logging import OlorinLogger
 
 # Add broca directory to path for producer import
-broca_path = os.path.join(os.path.dirname(__file__), '..', 'broca')
+broca_path = os.path.join(os.path.dirname(__file__), "..", "broca")
 if os.path.exists(broca_path):
     sys.path.insert(0, broca_path)
     from producer import TTSProducer
 
-from file_tracker import FileTracker
-from markdown_chunker import MarkdownChunker
+from file_tracker import FileTracker  # noqa: E402
+from markdown_chunker import MarkdownChunker  # noqa: E402
 
 # Initialize config
 config = Config()
@@ -43,31 +43,39 @@ class DocumentIngestionPipeline:
         """Initialize the ingestion pipeline with configuration from .env"""
 
         # Load configuration
-        self.input_dir = config.get_path('INPUT_DIR', '~/Documents/AI_IN')
-        self.chromadb_host = config.get('CHROMADB_HOST', 'localhost')
-        self.chromadb_port = config.get_int('CHROMADB_PORT', 8000)
-        self.collection_name = config.get('CHROMADB_COLLECTION', 'documents')
+        self.input_dir = config.get_path("INPUT_DIR", "~/Documents/AI_IN")
+        self.chromadb_host = config.get("CHROMADB_HOST", "localhost")
+        self.chromadb_port = config.get_int("CHROMADB_PORT", 8000)
+        self.collection_name = config.get("CHROMADB_COLLECTION", "documents")
 
-        self.embedding_model_name = config.get('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+        self.embedding_model_name = config.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-        self.chunk_size = config.get_int('CHUNK_SIZE', 1000)
-        self.chunk_overlap = config.get_int('CHUNK_OVERLAP', 200)
-        self.chunk_min_size = config.get_int('CHUNK_MIN_SIZE', 100)
+        self.chunk_size = config.get_int("CHUNK_SIZE", 1000)
+        self.chunk_overlap = config.get_int("CHUNK_OVERLAP", 200)
+        self.chunk_min_size = config.get_int("CHUNK_MIN_SIZE", 100)
 
-        self.poll_interval = config.get_int('POLL_INTERVAL', 5)
-        self.tracking_db = config.get('TRACKING_DB', './data/tracking.db')
+        self.poll_interval = config.get_int("POLL_INTERVAL", 5)
+        self.tracking_db = config.get_path(
+            "TRACKING_DB", "./hippocampus/data/tracking.db"
+        )
 
-        self.reprocess_on_change = config.get_bool('REPROCESS_ON_CHANGE', True)
-        self.delete_after_processing = config.get_bool('DELETE_AFTER_PROCESSING', False)
+        self.reprocess_on_change = config.get_bool("REPROCESS_ON_CHANGE", True)
+        self.delete_after_processing = config.get_bool("DELETE_AFTER_PROCESSING", False)
 
         # Setup logging
-        log_level = config.get('LOG_LEVEL', 'INFO')
-        default_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-        log_dir = config.get('LOG_DIR', default_log_dir)
-        log_file = config.get('LOG_FILE', os.path.join(log_dir, 'hippocampus-ingest.log'))
+        log_level = config.get("LOG_LEVEL", "INFO")
+        default_log_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "logs"
+        )
+        log_dir = config.get("LOG_DIR", default_log_dir)
+        log_file = config.get(
+            "LOG_FILE", os.path.join(log_dir, "hippocampus-ingest.log")
+        )
 
         # Initialize logger
-        self.logger = OlorinLogger(log_file=log_file, log_level=log_level, name=__name__)
+        self.logger = OlorinLogger(
+            log_file=log_file, log_level=log_level, name=__name__
+        )
         self.logger.info("Initializing Document Ingestion Pipeline...")
 
         # Create input directory if it doesn't exist
@@ -81,7 +89,7 @@ class DocumentIngestionPipeline:
         self.chunker = MarkdownChunker(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
-            min_chunk_size=self.chunk_min_size
+            min_chunk_size=self.chunk_min_size,
         )
 
         # Initialize embedding model
@@ -98,13 +106,13 @@ class DocumentIngestionPipeline:
         self.chroma_client = chromadb.HttpClient(
             host=self.chromadb_host,
             port=self.chromadb_port,
-            settings=Settings(anonymized_telemetry=False)
+            settings=Settings(anonymized_telemetry=False),
         )
 
         # Get or create collection
         self.collection = self.chroma_client.get_or_create_collection(
             name=self.collection_name,
-            metadata={"description": "Document embeddings for semantic search"}
+            metadata={"description": "Document embeddings for semantic search"},
         )
         self.logger.info(
             f"Using collection: {self.collection_name} "
@@ -113,7 +121,7 @@ class DocumentIngestionPipeline:
 
         # Initialize Kafka producer for notifications
         try:
-            if 'TTSProducer' in globals():
+            if "TTSProducer" in globals():
                 self.kafka_producer = TTSProducer()
                 self.logger.info("Kafka producer initialized for ai_out notifications")
             else:
@@ -179,7 +187,7 @@ class DocumentIngestionPipeline:
             self.logger.info(f"Processing: {file_path}")
 
             # Read file content
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
 
             if not content.strip():
@@ -199,12 +207,10 @@ class DocumentIngestionPipeline:
                 return False
 
             # Generate embeddings for all chunks
-            chunk_texts = [chunk['text'] for chunk in chunks]
+            chunk_texts = [chunk["text"] for chunk in chunks]
             self.logger.debug(f"Generating embeddings for {len(chunk_texts)} chunks...")
             embeddings = self.embedding_model.encode(
-                chunk_texts,
-                show_progress_bar=False,
-                convert_to_numpy=True
+                chunk_texts, show_progress_bar=False, convert_to_numpy=True
             )
 
             # Prepare data for ChromaDB
@@ -215,24 +221,22 @@ class DocumentIngestionPipeline:
 
             # Generate unique IDs for each chunk
             file_hash = self.file_tracker.compute_file_hash(file_path)[:8]
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 chunk_id = f"{file_hash}_{timestamp}_{idx}"
                 ids.append(chunk_id)
-                documents.append(chunk['text'])
-                metadatas.append(chunk['metadata'])
+                documents.append(chunk["text"])
+                metadatas.append(chunk["metadata"])
                 embeddings_list.append(embedding.tolist())
 
             # If file was processed before and changed, remove old chunks
             if self.file_tracker.is_file_processed(file_path):
                 self.logger.debug(f"Removing old chunks for: {file_path}")
                 # Query for old chunks from this file
-                old_results = self.collection.get(
-                    where={"source": file_path}
-                )
-                if old_results['ids']:
-                    self.collection.delete(ids=old_results['ids'])
+                old_results = self.collection.get(where={"source": file_path})
+                if old_results["ids"]:
+                    self.collection.delete(ids=old_results["ids"])
                     self.logger.debug(f"Removed {len(old_results['ids'])} old chunks")
 
             # Add to ChromaDB
@@ -240,14 +244,12 @@ class DocumentIngestionPipeline:
                 ids=ids,
                 embeddings=embeddings_list,
                 documents=documents,
-                metadatas=metadatas
+                metadatas=metadatas,
             )
 
             # Mark file as processed
             self.file_tracker.mark_processed(
-                file_path,
-                chunk_count=len(chunks),
-                status='success'
+                file_path, chunk_count=len(chunks), status="success"
             )
 
             self.logger.info(
@@ -259,11 +261,13 @@ class DocumentIngestionPipeline:
             # Send notification to ai_out
             if self.kafka_producer:
                 try:
-                    title = frontmatter_metadata.get('title', 'Unknown')
-                    author = frontmatter_metadata.get('author', 'Unknown')
+                    title = frontmatter_metadata.get("title", "Unknown")
+                    author = frontmatter_metadata.get("author", "Unknown")
                     message = f"Ingestion for {title} by {author} is now complete."
                     self.kafka_producer.send_message(message)
-                    self.logger.info(f"Sent completion notification to ai_out: {message}")
+                    self.logger.info(
+                        f"Sent completion notification to ai_out: {message}"
+                    )
                 except Exception as e:
                     self.logger.warning(f"Failed to send notification to ai_out: {e}")
 
@@ -275,16 +279,11 @@ class DocumentIngestionPipeline:
             return True
 
         except Exception as e:
-            self.logger.error(
-                f"Error processing {file_path}: {e}",
-                exc_info=True
-            )
+            self.logger.error(f"Error processing {file_path}: {e}", exc_info=True)
             # Mark as error so we can track failures
             try:
                 self.file_tracker.mark_processed(
-                    file_path,
-                    chunk_count=0,
-                    status='error'
+                    file_path, chunk_count=0, status="error"
                 )
             except Exception:
                 pass
@@ -299,15 +298,15 @@ class DocumentIngestionPipeline:
             Dictionary with scan statistics
         """
         stats = {
-            'files_found': 0,
-            'files_processed': 0,
-            'files_skipped': 0,
-            'files_failed': 0
+            "files_found": 0,
+            "files_processed": 0,
+            "files_skipped": 0,
+            "files_failed": 0,
         }
 
         # Find all markdown files
         md_files = self.find_markdown_files()
-        stats['files_found'] = len(md_files)
+        stats["files_found"] = len(md_files)
 
         if not md_files:
             self.logger.debug(f"No markdown files found in {self.input_dir}")
@@ -317,11 +316,11 @@ class DocumentIngestionPipeline:
         for file_path in md_files:
             if self.should_process_file(file_path):
                 if self.process_file(file_path):
-                    stats['files_processed'] += 1
+                    stats["files_processed"] += 1
                 else:
-                    stats['files_failed'] += 1
+                    stats["files_failed"] += 1
             else:
-                stats['files_skipped'] += 1
+                stats["files_skipped"] += 1
                 self.logger.debug(f"Skipping (already processed): {file_path}")
 
         return stats
@@ -331,8 +330,7 @@ class DocumentIngestionPipeline:
         Run continuous monitoring and ingestion loop.
         """
         self.logger.info(
-            f"Starting continuous monitoring "
-            f"(poll interval: {self.poll_interval}s)"
+            f"Starting continuous monitoring (poll interval: {self.poll_interval}s)"
         )
         self.logger.info("Press Ctrl+C to stop")
 
@@ -345,7 +343,7 @@ class DocumentIngestionPipeline:
 
                 stats = self.run_single_scan()
 
-                if stats['files_processed'] > 0 or stats['files_failed'] > 0:
+                if stats["files_processed"] > 0 or stats["files_failed"] > 0:
                     self.logger.info(
                         f"Scan #{scan_count} complete: "
                         f"{stats['files_processed']} processed, "
@@ -380,15 +378,17 @@ class DocumentIngestionPipeline:
 
         # Show final statistics
         stats = self.file_tracker.get_statistics()
-        self.logger.info("\n" + "="*60)
+        self.logger.info("\n" + "=" * 60)
         self.logger.info("Final Statistics:")
         self.logger.info(f"  Total files processed: {stats['total_files']}")
         self.logger.info(f"  Total chunks created: {stats['total_chunks']}")
-        self.logger.info(f"  Total size: {stats['total_size_bytes'] / 1024 / 1024:.2f} MB")
+        self.logger.info(
+            f"  Total size: {stats['total_size_bytes'] / 1024 / 1024:.2f} MB"
+        )
         self.logger.info(f"  Successful: {stats['successful']}")
         self.logger.info(f"  Errors: {stats['errors']}")
         self.logger.info(f"  ChromaDB documents: {self.collection.count()}")
-        self.logger.info("="*60)
+        self.logger.info("=" * 60)
         self.logger.info("Pipeline stopped")
 
 
@@ -398,7 +398,7 @@ def main():
         pipeline = DocumentIngestionPipeline()
         pipeline.run_continuous()
     except Exception as e:
-        logging.error(f"Fatal error: {e}", exc_info=True)
+        print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
 
 

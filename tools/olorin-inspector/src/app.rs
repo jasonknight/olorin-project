@@ -1,7 +1,5 @@
 //! Application state management for olorin-inspector
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 
 use crate::db::{
@@ -78,9 +76,6 @@ pub struct App {
     /// Configuration
     pub config: olorin_config::Config,
 
-    /// Project root path
-    pub project_root: PathBuf,
-
     /// Error messages from database loading
     pub load_errors: Vec<String>,
 }
@@ -89,13 +84,6 @@ impl App {
     /// Create a new application instance
     pub fn new() -> Result<Self> {
         let config = olorin_config::Config::new(None, true)?;
-
-        // Determine project root from config path
-        let project_root = config
-            .env_path()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
 
         let mut app = Self {
             focus: FocusedPanel::DatabaseList,
@@ -109,7 +97,6 @@ impl App {
             status_message: Some("Loading databases...".to_string()),
             clear_modal: None,
             config,
-            project_root,
             load_errors: Vec::new(),
         };
 
@@ -129,51 +116,48 @@ impl App {
 
     /// Load all available databases
     fn load_databases(&mut self) {
-        // Base paths for hippocampus databases
-        let hippocampus_data = self.project_root.join("hippocampus/data");
-
-        // SQLite file trackers
+        // SQLite file trackers - load paths from config
         let sqlite_trackers = [
-            ("Markdown Tracker", "tracking.db"),
-            ("PDF Tracker", "pdf_tracking.db"),
-            ("Ebook Tracker", "ebook_tracking.db"),
-            ("TXT Tracker", "txt_tracking.db"),
-            ("Office Tracker", "office_tracking.db"),
+            ("Markdown Tracker", "TRACKING_DB", "./hippocampus/data/tracking.db"),
+            ("PDF Tracker", "PDF_TRACKING_DB", "./hippocampus/data/pdf_tracking.db"),
+            ("Ebook Tracker", "EBOOK_TRACKING_DB", "./hippocampus/data/ebook_tracking.db"),
+            ("TXT Tracker", "TXT_TRACKING_DB", "./hippocampus/data/txt_tracking.db"),
+            ("Office Tracker", "OFFICE_TRACKING_DB", "./hippocampus/data/office_tracking.db"),
         ];
 
-        for (name, file) in sqlite_trackers {
-            let path = hippocampus_data.join(file);
-            match SqliteFileTracker::new(name, &path) {
-                Ok(db) => self.databases.push(Box::new(db)),
-                Err(DbError::NotFound(_)) => {
-                    // Silent skip for non-existent databases
-                }
-                Err(e) => {
-                    self.load_errors
-                        .push(format!("{}: {}", name, e));
+        for (name, config_key, default_path) in sqlite_trackers {
+            if let Some(path) = self.config.get_path(config_key, Some(default_path)) {
+                match SqliteFileTracker::new(name, &path) {
+                    Ok(db) => self.databases.push(Box::new(db)),
+                    Err(DbError::NotFound(_)) => {
+                        // Silent skip for non-existent databases
+                    }
+                    Err(e) => {
+                        self.load_errors.push(format!("{}: {}", name, e));
+                    }
                 }
             }
         }
 
         // Context store
-        let context_path = hippocampus_data.join("context.db");
-        match SqliteContext::new("Context Store", &context_path) {
-            Ok(db) => self.databases.push(Box::new(db)),
-            Err(DbError::NotFound(_)) => {}
-            Err(e) => {
-                self.load_errors
-                    .push(format!("Context Store: {}", e));
+        if let Some(context_path) = self.config.get_path("HIPPOCAMPUS_CONTEXT_DB", Some("./hippocampus/data/context.db")) {
+            match SqliteContext::new("Context Store", &context_path) {
+                Ok(db) => self.databases.push(Box::new(db)),
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => {
+                    self.load_errors.push(format!("Context Store: {}", e));
+                }
             }
         }
 
         // Chat history
-        let chat_path = self.project_root.join("cortex/cortex/data/chat.db");
-        match SqliteChat::new("Chat History", &chat_path) {
-            Ok(db) => self.databases.push(Box::new(db)),
-            Err(DbError::NotFound(_)) => {}
-            Err(e) => {
-                self.load_errors
-                    .push(format!("Chat History: {}", e));
+        if let Some(chat_path) = self.config.get_path("CHAT_DB_PATH", Some("./cortex/data/chat.db")) {
+            match SqliteChat::new("Chat History", &chat_path) {
+                Ok(db) => self.databases.push(Box::new(db)),
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => {
+                    self.load_errors.push(format!("Chat History: {}", e));
+                }
             }
         }
 

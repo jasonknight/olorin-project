@@ -83,6 +83,11 @@ fn key_to_path(key: &str) -> Option<&'static str> {
         "CHUNK_MIN_SIZE" => Some("hippocampus.chunking.min_size"),
         "POLL_INTERVAL" => Some("hippocampus.poll_interval"),
         "TRACKING_DB" => Some("hippocampus.tracking_db"),
+        "PDF_TRACKING_DB" => Some("hippocampus.pdf_tracking_db"),
+        "EBOOK_TRACKING_DB" => Some("hippocampus.ebook_tracking_db"),
+        "TXT_TRACKING_DB" => Some("hippocampus.txt_tracking_db"),
+        "OFFICE_TRACKING_DB" => Some("hippocampus.office_tracking_db"),
+        "HIPPOCAMPUS_CONTEXT_DB" => Some("hippocampus.context_db"),
         "REPROCESS_ON_CHANGE" => Some("hippocampus.reprocess_on_change"),
         "DELETE_AFTER_PROCESSING" => Some("hippocampus.delete_after_processing"),
         "LOG_FILE" => Some("hippocampus.log_file"),
@@ -148,6 +153,7 @@ fn find_project_root() -> Option<PathBuf> {
 /// Provides type-safe getters and optional hot-reload support for runtime
 /// configuration changes. Prefers settings.json if available, falls back to .env.
 pub struct Config {
+    project_root: PathBuf,
     json_path: PathBuf,
     env_path: PathBuf,
     watch: bool,
@@ -171,21 +177,24 @@ impl Config {
     pub fn new(config_path: Option<PathBuf>, watch: bool) -> Result<Self, ConfigError> {
         let root = find_project_root().ok_or(ConfigError::ProjectRootNotFound)?;
 
-        let (json_path, env_path) = match config_path {
+        let (project_root, json_path, env_path) = match config_path {
             Some(p) => {
                 if p.extension().is_some_and(|e| e == "json") {
-                    (p.clone(), p.with_extension("").with_file_name(".env"))
+                    let parent = p.parent().map(PathBuf::from).unwrap_or_else(|| root.clone());
+                    (parent.clone(), p.clone(), parent.join(".env"))
                 } else if p.file_name().is_some_and(|n| n == ".env") {
-                    (p.with_file_name("settings.json"), p)
+                    let parent = p.parent().map(PathBuf::from).unwrap_or_else(|| root.clone());
+                    (parent.clone(), parent.join("settings.json"), p)
                 } else {
                     // Assume it's a directory
-                    (p.join("settings.json"), p.join(".env"))
+                    (p.clone(), p.join("settings.json"), p.join(".env"))
                 }
             }
-            None => (root.join("settings.json"), root.join(".env")),
+            None => (root.clone(), root.join("settings.json"), root.join(".env")),
         };
 
         let mut config = Self {
+            project_root,
             json_path,
             env_path,
             watch,
@@ -491,9 +500,11 @@ impl Config {
         default
     }
 
-    /// Get a configuration value as an expanded path.
+    /// Get a configuration value as an expanded, absolute path.
     ///
-    /// Expands ~ to the user's home directory.
+    /// - Expands ~ to the user's home directory
+    /// - Resolves relative paths (starting with ./ or not starting with /)
+    ///   against the project root (where settings.json lives)
     ///
     /// # Arguments
     ///
@@ -502,17 +513,31 @@ impl Config {
     ///
     /// # Returns
     ///
-    /// The expanded path as PathBuf or None
+    /// The absolute path as PathBuf or None
     pub fn get_path(&self, key: &str, default: Option<&str>) -> Option<PathBuf> {
         let value = self.get(key, default)?;
 
+        // Expand ~ to home directory
         if value.starts_with('~') {
             if let Some(home) = dirs::home_dir() {
                 return Some(home.join(value[1..].trim_start_matches('/')));
             }
         }
 
-        Some(PathBuf::from(value))
+        let path = PathBuf::from(&value);
+
+        // If it's already absolute, return as-is
+        if path.is_absolute() {
+            return Some(path);
+        }
+
+        // Resolve relative paths against project root
+        Some(self.project_root.join(path))
+    }
+
+    /// Return the project root directory (where settings.json lives).
+    pub fn project_root(&self) -> &PathBuf {
+        &self.project_root
     }
 
     /// Get a configuration value as a list of strings.

@@ -34,7 +34,7 @@ class OlorinLogger:
         name: Logger name (default: __name__ of caller)
     """
 
-    def __init__(self, log_file: str, log_level: str = 'INFO', name: str = None):
+    def __init__(self, log_file: str, log_level: str = "INFO", name: str = None):
         self.log_file = log_file
         self.log_level = log_level.upper()
 
@@ -57,15 +57,15 @@ class OlorinLogger:
 
         # Create formatter
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         # Create flushing file handler (10MB rotation, 5 backups)
         file_handler = FlushingFileHandler(
             log_file,
             maxBytes=10 * 1024 * 1024,  # 10 MB
-            backupCount=5
+            backupCount=5,
         )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)

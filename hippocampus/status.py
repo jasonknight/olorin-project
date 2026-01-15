@@ -12,7 +12,7 @@ from file_tracker import FileTracker
 from datetime import datetime
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 
 # Initialize config
@@ -22,15 +22,15 @@ config = Config()
 def show_status():
     """Display pipeline status and statistics."""
     # Load configuration
-    chromadb_host = config.get('CHROMADB_HOST', 'localhost')
-    chromadb_port = config.get_int('CHROMADB_PORT', 8000)
-    collection_name = config.get('CHROMADB_COLLECTION', 'documents')
-    tracking_db = config.get('TRACKING_DB', './data/tracking.db')
-    input_dir = config.get_path('INPUT_DIR', '~/Documents/AI_IN')
+    chromadb_host = config.get("CHROMADB_HOST", "localhost")
+    chromadb_port = config.get_int("CHROMADB_PORT", 8000)
+    collection_name = config.get("CHROMADB_COLLECTION", "documents")
+    tracking_db = config.get_path("TRACKING_DB", "./hippocampus/data/tracking.db")
+    input_dir = config.get_path("INPUT_DIR", "~/Documents/AI_IN")
 
-    print("="*80)
+    print("=" * 80)
     print("Hippocampus - Document Ingestion Pipeline Status")
-    print("="*80)
+    print("=" * 80)
 
     # Check ChromaDB connection
     print("\n[ChromaDB]")
@@ -38,11 +38,11 @@ def show_status():
         client = chromadb.HttpClient(
             host=chromadb_host,
             port=chromadb_port,
-            settings=Settings(anonymized_telemetry=False)
+            settings=Settings(anonymized_telemetry=False),
         )
         collection = client.get_collection(name=collection_name)
         doc_count = collection.count()
-        print(f"  Status: ✓ Connected")
+        print("  Status: ✓ Connected")
         print(f"  Host: {chromadb_host}:{chromadb_port}")
         print(f"  Collection: {collection_name}")
         print(f"  Documents: {doc_count}")
@@ -65,19 +65,19 @@ def show_status():
         print(f"  Errors: {stats['errors']}")
 
         # Show recent files
-        if stats['total_files'] > 0:
+        if stats["total_files"] > 0:
             print("\n  Recent files:")
             recent_files = tracker.get_all_processed_files()[:5]
             for file_info in recent_files:
-                processed_at = file_info['processed_at']
+                processed_at = file_info["processed_at"]
                 # Parse and format timestamp
                 try:
                     dt = datetime.fromisoformat(processed_at)
-                    time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-                except:
+                    time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except ValueError:
                     time_str = processed_at
 
-                status_icon = "✓" if file_info['status'] == 'success' else "✗"
+                status_icon = "✓" if file_info["status"] == "success" else "✗"
                 print(f"    {status_icon} {file_info['file_path']}")
                 print(f"       {time_str} - {file_info['chunk_count']} chunks")
 
@@ -89,13 +89,13 @@ def show_status():
     print(f"  Path: {input_dir}")
 
     if os.path.exists(input_dir):
-        print(f"  Status: ✓ Exists")
+        print("  Status: ✓ Exists")
 
         # Count markdown files
         md_files = []
         for root, dirs, files in os.walk(input_dir):
             for file in files:
-                if file.endswith('.md'):
+                if file.endswith(".md"):
                     md_files.append(os.path.join(root, file))
 
         print(f"  Markdown files: {len(md_files)}")
@@ -110,7 +110,7 @@ def show_status():
             if len(md_files) > 10:
                 print(f"    ... and {len(md_files) - 10} more")
     else:
-        print(f"  Status: ✗ Directory does not exist")
+        print("  Status: ✗ Directory does not exist")
 
     # Configuration summary
     print("\n[Configuration]")
@@ -119,9 +119,11 @@ def show_status():
     print(f"  Chunk overlap: {config.get('CHUNK_OVERLAP', '200')} chars")
     print(f"  Poll interval: {config.get('POLL_INTERVAL', '5')} seconds")
     print(f"  Reprocess on change: {config.get('REPROCESS_ON_CHANGE', 'true')}")
-    print(f"  Delete after processing: {config.get('DELETE_AFTER_PROCESSING', 'false')}")
+    print(
+        f"  Delete after processing: {config.get('DELETE_AFTER_PROCESSING', 'false')}"
+    )
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
 
 
 def main():

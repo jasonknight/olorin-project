@@ -3,18 +3,20 @@
 Script to fix Kafka topic timestamp configuration.
 This changes the topic to use LogAppendTime (broker time) instead of CreateTime (client time).
 """
+
 import subprocess
 import sys
 import os
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 
 config = Config()
 
-KAFKA_TOPIC = config.get('BROCA_KAFKA_TOPIC', 'ai_out')
-BOOTSTRAP_SERVERS = config.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
+KAFKA_TOPIC = config.get("BROCA_KAFKA_TOPIC", "ai_out")
+BOOTSTRAP_SERVERS = config.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
 
 def run_command(cmd):
     """Run a shell command and return output"""
@@ -24,6 +26,7 @@ def run_command(cmd):
     if result.stderr:
         print(result.stderr, file=sys.stderr)
     return result.returncode == 0
+
 
 def main():
     print(f"Fixing timestamp configuration for topic: {KAFKA_TOPIC}")
@@ -44,6 +47,7 @@ def main():
         return 1
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

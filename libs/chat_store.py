@@ -38,7 +38,7 @@ class ChatStore:
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get thread-local database connection."""
-        if not hasattr(self._local, 'connection') or self._local.connection is None:
+        if not hasattr(self._local, "connection") or self._local.connection is None:
             self._local.connection = sqlite3.connect(self.db_path)
             self._local.connection.row_factory = sqlite3.Row
         return self._local.connection
@@ -102,7 +102,7 @@ class ChatStore:
     @staticmethod
     def _compute_hash(content: str) -> str:
         """Compute SHA-256 hash of content."""
-        return hashlib.sha256(content.encode('utf-8')).hexdigest()
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     # =========================================================================
     # Conversation Management
@@ -125,7 +125,7 @@ class ChatStore:
 
         if row:
             logger.debug(f"Found active conversation: {row['id']}")
-            return row['id']
+            return row["id"]
 
         # Create new conversation
         conversation_id = str(uuid.uuid4())
@@ -136,7 +136,7 @@ class ChatStore:
             INSERT INTO conversations (id, created_at, last_message_at, message_count, is_active)
             VALUES (?, ?, ?, 0, 1)
             """,
-            (conversation_id, now, now)
+            (conversation_id, now, now),
         )
         conn.commit()
 
@@ -155,7 +155,7 @@ class ChatStore:
             "SELECT id FROM conversations WHERE is_active = 1 ORDER BY last_message_at DESC LIMIT 1"
         )
         row = cursor.fetchone()
-        return row['id'] if row else None
+        return row["id"] if row else None
 
     def reset_conversation(self) -> str:
         """
@@ -180,10 +180,7 @@ class ChatStore:
     # =========================================================================
 
     def add_user_message(
-        self,
-        conversation_id: str,
-        content: str,
-        prompt_id: Optional[str] = None
+        self, conversation_id: str, content: str, prompt_id: Optional[str] = None
     ) -> str:
         """
         Add a user message to the conversation.
@@ -196,13 +193,9 @@ class ChatStore:
         Returns:
             message_id (UUID string)
         """
-        return self._add_message(conversation_id, 'user', content, prompt_id)
+        return self._add_message(conversation_id, "user", content, prompt_id)
 
-    def add_assistant_message(
-        self,
-        conversation_id: str,
-        content: str
-    ) -> str:
+    def add_assistant_message(self, conversation_id: str, content: str) -> str:
         """
         Add an assistant message to the conversation.
 
@@ -213,14 +206,14 @@ class ChatStore:
         Returns:
             message_id (UUID string)
         """
-        return self._add_message(conversation_id, 'assistant', content)
+        return self._add_message(conversation_id, "assistant", content)
 
     def _add_message(
         self,
         conversation_id: str,
         role: str,
         content: str,
-        prompt_id: Optional[str] = None
+        prompt_id: Optional[str] = None,
     ) -> str:
         """
         Internal method to add a message to the conversation.
@@ -245,7 +238,7 @@ class ChatStore:
             INSERT INTO messages (id, conversation_id, role, content, content_hash, prompt_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, conversation_id, role, content, content_hash, prompt_id, now)
+            (message_id, conversation_id, role, content, content_hash, prompt_id, now),
         )
 
         # Update conversation metadata
@@ -255,13 +248,45 @@ class ChatStore:
             SET last_message_at = ?, message_count = message_count + 1
             WHERE id = ?
             """,
-            (now, conversation_id)
+            (now, conversation_id),
         )
 
         conn.commit()
 
-        logger.debug(f"Added {role} message {message_id} to conversation {conversation_id}")
+        logger.debug(
+            f"Added {role} message {message_id} to conversation {conversation_id}"
+        )
         return message_id
+
+    def update_message(self, message_id: str, content: str) -> bool:
+        """
+        Update the content of an existing message (used for streaming updates).
+
+        Args:
+            message_id: ID of the message to update
+            content: New message content
+
+        Returns:
+            True if message was updated, False if not found
+        """
+        conn = self._get_connection()
+        content_hash = self._compute_hash(content)
+        now = datetime.now().isoformat()
+
+        cursor = conn.execute(
+            """
+            UPDATE messages
+            SET content = ?, content_hash = ?, created_at = ?
+            WHERE id = ?
+            """,
+            (content, content_hash, now, message_id),
+        )
+        conn.commit()
+
+        if cursor.rowcount > 0:
+            logger.debug(f"Updated message {message_id}")
+            return True
+        return False
 
     def get_conversation_messages(self, conversation_id: str) -> List[Dict]:
         """
@@ -281,7 +306,7 @@ class ChatStore:
             WHERE conversation_id = ?
             ORDER BY created_at ASC
             """,
-            (conversation_id,)
+            (conversation_id,),
         )
         return [dict(row) for row in cursor.fetchall()]
 
@@ -324,20 +349,20 @@ class ChatStore:
         msg_row = cursor.fetchone()
 
         return {
-            'total_conversations': conv_row['total_conversations'] or 0,
-            'active_conversations': conv_row['active_conversations'] or 0,
-            'oldest_conversation': conv_row['oldest_conversation'],
-            'newest_activity': conv_row['newest_activity'],
-            'total_messages': msg_row['total_messages'] or 0,
-            'user_messages': msg_row['user_messages'] or 0,
-            'assistant_messages': msg_row['assistant_messages'] or 0
+            "total_conversations": conv_row["total_conversations"] or 0,
+            "active_conversations": conv_row["active_conversations"] or 0,
+            "oldest_conversation": conv_row["oldest_conversation"],
+            "newest_activity": conv_row["newest_activity"],
+            "total_messages": msg_row["total_messages"] or 0,
+            "user_messages": msg_row["user_messages"] or 0,
+            "assistant_messages": msg_row["assistant_messages"] or 0,
         }
 
     def get_conversation_count(self) -> int:
         """Get total number of conversations."""
         conn = self._get_connection()
         cursor = conn.execute("SELECT COUNT(*) as count FROM conversations")
-        return cursor.fetchone()['count']
+        return cursor.fetchone()["count"]
 
     def get_message_count(self, conversation_id: Optional[str] = None) -> int:
         """
@@ -353,11 +378,11 @@ class ChatStore:
         if conversation_id:
             cursor = conn.execute(
                 "SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?",
-                (conversation_id,)
+                (conversation_id,),
             )
         else:
             cursor = conn.execute("SELECT COUNT(*) as count FROM messages")
-        return cursor.fetchone()['count']
+        return cursor.fetchone()["count"]
 
     def clear_all(self) -> Tuple[int, int]:
         """
@@ -378,7 +403,9 @@ class ChatStore:
 
         conn.commit()
 
-        logger.info(f"Cleared {conversations_deleted} conversations and {messages_deleted} messages")
+        logger.info(
+            f"Cleared {conversations_deleted} conversations and {messages_deleted} messages"
+        )
         return conversations_deleted, messages_deleted
 
     def delete_old_conversations(self, older_than_days: int = 30) -> int:
@@ -392,6 +419,7 @@ class ChatStore:
             Number of conversations deleted
         """
         from datetime import timedelta
+
         cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
 
         conn = self._get_connection()
@@ -404,17 +432,19 @@ class ChatStore:
                 WHERE last_message_at < ? AND is_active = 0
             )
             """,
-            (cutoff,)
+            (cutoff,),
         )
 
         # Delete old inactive conversations
         cursor = conn.execute(
             "DELETE FROM conversations WHERE last_message_at < ? AND is_active = 0",
-            (cutoff,)
+            (cutoff,),
         )
         deleted = cursor.rowcount
 
         conn.commit()
 
-        logger.info(f"Deleted {deleted} inactive conversations older than {older_than_days} days")
+        logger.info(
+            f"Deleted {deleted} inactive conversations older than {older_than_days} days"
+        )
         return deleted

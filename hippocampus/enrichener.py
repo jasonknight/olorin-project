@@ -26,7 +26,7 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
@@ -35,10 +35,10 @@ from libs.context_store import ContextStore
 config = Config(watch=True)
 
 # Set up logging
-default_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-log_dir = config.get('LOG_DIR', default_log_dir)
-log_file = os.path.join(log_dir, 'hippocampus-enrichener.log')
-env_log_level = config.get('LOG_LEVEL', 'INFO')
+default_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+log_dir = config.get("LOG_DIR", default_log_dir)
+log_file = os.path.join(log_dir, "hippocampus-enrichener.log")
+env_log_level = config.get("LOG_LEVEL", "INFO")
 
 # Initialize logger
 logger = OlorinLogger(log_file=log_file, log_level=env_log_level, name=__name__)
@@ -70,13 +70,14 @@ DECISION_USER_TEMPLATE = """Query: {prompt}
 Does this query need context enrichment? Answer YES or NO only."""
 
 
-
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
+
 class EnrichenerConfig:
     """Configuration wrapper for Enrichener consumer"""
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self._load()
@@ -84,43 +85,50 @@ class EnrichenerConfig:
     def _load(self):
         """Load configuration values from Config"""
         # Kafka settings
-        self.kafka_bootstrap_servers = self.cfg.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
-        self.kafka_input_topic = self.cfg.get('ENRICHENER_INPUT_TOPIC', 'ai_in')
-        self.kafka_output_topic = self.cfg.get('ENRICHENER_OUTPUT_TOPIC', 'prompts')
-        self.kafka_broca_topic = self.cfg.get('BROCA_KAFKA_TOPIC', 'ai_out')
-        self.kafka_consumer_group = self.cfg.get('ENRICHENER_CONSUMER_GROUP', 'enrichener-consumer-group')
-        self.kafka_auto_offset_reset = self.cfg.get('ENRICHENER_AUTO_OFFSET_RESET', 'earliest')
+        self.kafka_bootstrap_servers = self.cfg.get(
+            "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+        )
+        self.kafka_input_topic = self.cfg.get("ENRICHENER_INPUT_TOPIC", "ai_in")
+        self.kafka_output_topic = self.cfg.get("ENRICHENER_OUTPUT_TOPIC", "prompts")
+        self.kafka_broca_topic = self.cfg.get("BROCA_KAFKA_TOPIC", "ai_out")
+        self.kafka_consumer_group = self.cfg.get(
+            "ENRICHENER_CONSUMER_GROUP", "enrichener-consumer-group"
+        )
+        self.kafka_auto_offset_reset = self.cfg.get(
+            "ENRICHENER_AUTO_OFFSET_RESET", "earliest"
+        )
 
         # Exo/LLM settings
-        self.exo_base_url = self.cfg.get('EXO_BASE_URL', 'http://localhost:52415/v1')
-        self.exo_api_key = self.cfg.get('EXO_API_KEY', 'dummy-key')
+        self.exo_base_url = self.cfg.get("EXO_BASE_URL", "http://localhost:52415/v1")
+        self.exo_api_key = self.cfg.get("EXO_API_KEY", "dummy-key")
 
         # MODEL_NAME is optional - if empty/not set, will auto-detect from running instance
-        model_name_env = self.cfg.get('MODEL_NAME', '').strip()
+        model_name_env = self.cfg.get("MODEL_NAME", "").strip()
         self.model_name = model_name_env if model_name_env else None
 
-        self.llm_timeout_seconds = self.cfg.get_int('LLM_TIMEOUT_SECONDS', 120)
-        self.decision_temperature = self.cfg.get_float('DECISION_TEMPERATURE', 0.1)
+        self.llm_timeout_seconds = self.cfg.get_int("LLM_TIMEOUT_SECONDS", 120)
+        self.decision_temperature = self.cfg.get_float("DECISION_TEMPERATURE", 0.1)
 
         # ChromaDB settings
-        self.chromadb_host = self.cfg.get('CHROMADB_HOST', 'localhost')
-        self.chromadb_port = self.cfg.get_int('CHROMADB_PORT', 8000)
-        self.chromadb_collection = self.cfg.get('CHROMADB_COLLECTION', 'documents')
-        self.chromadb_n_results = self.cfg.get_int('CHROMADB_QUERY_N_RESULTS', 10)
+        self.chromadb_host = self.cfg.get("CHROMADB_HOST", "localhost")
+        self.chromadb_port = self.cfg.get_int("CHROMADB_PORT", 8000)
+        self.chromadb_collection = self.cfg.get("CHROMADB_COLLECTION", "documents")
+        self.chromadb_n_results = self.cfg.get_int("CHROMADB_QUERY_N_RESULTS", 10)
 
         # Context store settings
-        # Default path is relative to hippocampus directory
-        default_context_db = os.path.join(os.path.dirname(__file__), 'data', 'context.db')
-        self.context_db_path = self.cfg.get('CONTEXT_DB_PATH', default_context_db)
+        # Path resolved via config library against project root
+        self.context_db_path = self.cfg.get_path(
+            "CONTEXT_DB_PATH", "./hippocampus/data/context.db"
+        )
 
         # Embedding settings
-        self.embedding_model = self.cfg.get('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+        self.embedding_model = self.cfg.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
         # Thread pool
-        self.thread_pool_size = self.cfg.get_int('ENRICHENER_THREAD_POOL_SIZE', 3)
+        self.thread_pool_size = self.cfg.get_int("ENRICHENER_THREAD_POOL_SIZE", 3)
 
         # Logging
-        self.log_level = self.cfg.get('LOG_LEVEL', 'INFO')
+        self.log_level = self.cfg.get("LOG_LEVEL", "INFO")
 
     def reload(self) -> bool:
         """Check for config changes and reload if needed"""
@@ -138,6 +146,7 @@ def load_config() -> EnrichenerConfig:
 
     # Update logging level
     import logging
+
     logger.setLevel(getattr(logging, enrichener_cfg.log_level.upper(), logging.INFO))
 
     logger.info("Configuration loaded successfully:")
@@ -147,10 +156,14 @@ def load_config() -> EnrichenerConfig:
     logger.info(f"  Kafka Broca Topic: {enrichener_cfg.kafka_broca_topic}")
     logger.info(f"  Kafka Consumer Group: {enrichener_cfg.kafka_consumer_group}")
     logger.info(f"  Exo Base URL: {enrichener_cfg.exo_base_url}")
-    logger.info(f"  Model Name: {enrichener_cfg.model_name if enrichener_cfg.model_name else 'auto-detect'}")
+    logger.info(
+        f"  Model Name: {enrichener_cfg.model_name if enrichener_cfg.model_name else 'auto-detect'}"
+    )
     logger.info(f"  LLM Timeout: {enrichener_cfg.llm_timeout_seconds}s")
     logger.info(f"  Decision Temperature: {enrichener_cfg.decision_temperature}")
-    logger.info(f"  ChromaDB: {enrichener_cfg.chromadb_host}:{enrichener_cfg.chromadb_port}")
+    logger.info(
+        f"  ChromaDB: {enrichener_cfg.chromadb_host}:{enrichener_cfg.chromadb_port}"
+    )
     logger.info(f"  ChromaDB Collection: {enrichener_cfg.chromadb_collection}")
     logger.info(f"  ChromaDB Results: {enrichener_cfg.chromadb_n_results}")
     logger.info(f"  Context DB: {enrichener_cfg.context_db_path}")
@@ -164,6 +177,7 @@ def load_config() -> EnrichenerConfig:
 # =============================================================================
 # MAIN ENRICHER CLASS
 # =============================================================================
+
 
 class PromptEnricher:
     """
@@ -201,12 +215,13 @@ class PromptEnricher:
 
         # Initialize thread pool for message processing
         self.executor = ThreadPoolExecutor(
-            max_workers=config.thread_pool_size,
-            thread_name_prefix="enricher-worker"
+            max_workers=config.thread_pool_size, thread_name_prefix="enricher-worker"
         )
         self.active_futures = []
         self.shutdown_event = threading.Event()
-        logger.info(f"Thread pool executor initialized with {config.thread_pool_size} workers")
+        logger.info(
+            f"Thread pool executor initialized with {config.thread_pool_size} workers"
+        )
 
         logger.info("PromptEnricher initialized successfully")
         logger.info(f"  Input topic: {config.kafka_input_topic}")
@@ -215,37 +230,41 @@ class PromptEnricher:
 
     def _init_kafka_consumer(self):
         """Initialize Kafka consumer with anti-rebalance settings"""
-        logger.info(f"Creating Kafka consumer for topic '{self.config.kafka_input_topic}'...")
+        logger.info(
+            f"Creating Kafka consumer for topic '{self.config.kafka_input_topic}'..."
+        )
         logger.info(f"  Bootstrap servers: {self.config.kafka_bootstrap_servers}")
         logger.info(f"  Consumer group: {self.config.kafka_consumer_group}")
         try:
             self.consumer = KafkaConsumer(
                 self.config.kafka_input_topic,
                 bootstrap_servers=self.config.kafka_bootstrap_servers,
-                value_deserializer=lambda m: m.decode('utf-8'),
+                value_deserializer=lambda m: m.decode("utf-8"),
                 auto_offset_reset=self.config.kafka_auto_offset_reset,
                 enable_auto_commit=True,
                 group_id=self.config.kafka_consumer_group,
                 # Critical: prevent rebalance during long LLM calls
                 max_poll_interval_ms=600000,  # 10 minutes
-                session_timeout_ms=60000,     # 60 seconds
-                heartbeat_interval_ms=10000   # 10 seconds
+                session_timeout_ms=60000,  # 60 seconds
+                heartbeat_interval_ms=10000,  # 10 seconds
             )
             logger.info("Kafka consumer created successfully")
-            logger.info(f"  max_poll_interval_ms: 600000 (10 minutes)")
-            logger.info(f"  session_timeout_ms: 60000 (60 seconds)")
-            logger.info(f"  heartbeat_interval_ms: 10000 (10 seconds)")
+            logger.info("  max_poll_interval_ms: 600000 (10 minutes)")
+            logger.info("  session_timeout_ms: 60000 (60 seconds)")
+            logger.info("  heartbeat_interval_ms: 10000 (10 seconds)")
         except Exception as e:
             logger.error(f"Failed to create Kafka consumer: {e}", exc_info=True)
             raise
 
     def _init_kafka_producer(self):
         """Initialize Kafka producer for output"""
-        logger.info(f"Creating Kafka producer for output topic '{self.config.kafka_output_topic}'...")
+        logger.info(
+            f"Creating Kafka producer for output topic '{self.config.kafka_output_topic}'..."
+        )
         try:
             self.producer = KafkaProducer(
                 bootstrap_servers=self.config.kafka_bootstrap_servers,
-                value_serializer=lambda v: json.dumps(v).encode('utf-8')
+                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
             )
             logger.info("Kafka producer created successfully")
         except Exception as e:
@@ -254,7 +273,9 @@ class PromptEnricher:
 
     def _init_chromadb(self):
         """Initialize ChromaDB client with connection retry"""
-        logger.info(f"Connecting to ChromaDB at {self.config.chromadb_host}:{self.config.chromadb_port}...")
+        logger.info(
+            f"Connecting to ChromaDB at {self.config.chromadb_host}:{self.config.chromadb_port}..."
+        )
         max_retries = 3
         retry_delay = 2
 
@@ -263,17 +284,21 @@ class PromptEnricher:
                 self.chromadb_client = chromadb.HttpClient(
                     host=self.config.chromadb_host,
                     port=self.config.chromadb_port,
-                    settings=Settings(anonymized_telemetry=False)
+                    settings=Settings(anonymized_telemetry=False),
                 )
                 self.collection = self.chromadb_client.get_collection(
                     name=self.config.chromadb_collection
                 )
                 doc_count = self.collection.count()
-                logger.info(f"Connected to ChromaDB successfully")
-                logger.info(f"  Collection '{self.config.chromadb_collection}' has {doc_count} documents")
+                logger.info("Connected to ChromaDB successfully")
+                logger.info(
+                    f"  Collection '{self.config.chromadb_collection}' has {doc_count} documents"
+                )
                 return
             except Exception as e:
-                logger.warning(f"ChromaDB connection attempt {attempt+1}/{max_retries} failed: {e}")
+                logger.warning(
+                    f"ChromaDB connection attempt {attempt + 1}/{max_retries} failed: {e}"
+                )
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay * (attempt + 1))
                 else:
@@ -288,7 +313,7 @@ class PromptEnricher:
         try:
             self.context_store = ContextStore(self.config.context_db_path)
             stats = self.context_store.get_statistics()
-            logger.info(f"Context store initialized successfully")
+            logger.info("Context store initialized successfully")
             logger.info(f"  Existing contexts: {stats['total_contexts']}")
             logger.info(f"  Unique prompts: {stats['unique_prompts']}")
         except Exception as e:
@@ -307,10 +332,11 @@ class PromptEnricher:
 
     def _init_openai_client(self):
         """Initialize OpenAI client pointing to Exo"""
-        logger.info(f"Initializing OpenAI client for Exo at {self.config.exo_base_url}...")
+        logger.info(
+            f"Initializing OpenAI client for Exo at {self.config.exo_base_url}..."
+        )
         client = OpenAI(
-            base_url=self.config.exo_base_url,
-            api_key=self.config.exo_api_key
+            base_url=self.config.exo_base_url, api_key=self.config.exo_api_key
         )
         logger.info("OpenAI client initialized successfully")
         return client
@@ -321,7 +347,7 @@ class PromptEnricher:
         logger.info(f"[{thread_name}] Auto-detecting running model from Exo...")
 
         try:
-            base_url = self.config.exo_base_url.rstrip('/v1').rstrip('/')
+            base_url = self.config.exo_base_url.rstrip("/v1").rstrip("/")
             state_url = f"{base_url}/state"
             logger.debug(f"[{thread_name}] Querying: {state_url}")
 
@@ -329,8 +355,8 @@ class PromptEnricher:
             response.raise_for_status()
             state = response.json()
 
-            instances = state.get('instances', {})
-            runners = state.get('runners', {})
+            instances = state.get("instances", {})
+            runners = state.get("runners", {})
             logger.debug(f"[{thread_name}] Found {len(instances)} instance(s)")
 
             if not instances:
@@ -342,9 +368,11 @@ class PromptEnricher:
                 if isinstance(instance_wrapper, dict):
                     for variant_name, instance_data in instance_wrapper.items():
                         if isinstance(instance_data, dict):
-                            shard_assignments = instance_data.get('shardAssignments', {})
-                            model_id = shard_assignments.get('modelId')
-                            runner_to_shard = shard_assignments.get('runnerToShard', {})
+                            shard_assignments = instance_data.get(
+                                "shardAssignments", {}
+                            )
+                            model_id = shard_assignments.get("modelId")
+                            runner_to_shard = shard_assignments.get("runnerToShard", {})
 
                             if not model_id:
                                 continue
@@ -354,13 +382,22 @@ class PromptEnricher:
                             for runner_id in runner_to_shard.keys():
                                 runner_status = runners.get(runner_id, {})
                                 if isinstance(runner_status, dict):
-                                    status_type = next(iter(runner_status.keys())) if runner_status else None
-                                    if status_type not in ["RunnerReady", "RunnerRunning"]:
+                                    status_type = (
+                                        next(iter(runner_status.keys()))
+                                        if runner_status
+                                        else None
+                                    )
+                                    if status_type not in [
+                                        "RunnerReady",
+                                        "RunnerRunning",
+                                    ]:
                                         all_ready = False
                                         break
 
                             if all_ready and runner_to_shard:
-                                logger.info(f"[{thread_name}] Auto-detected model: {model_id}")
+                                logger.info(
+                                    f"[{thread_name}] Auto-detected model: {model_id}"
+                                )
                                 return model_id
 
             logger.warning(f"[{thread_name}] No ready model found")
@@ -385,8 +422,10 @@ class PromptEnricher:
             logger.info("Detected .env file change, reloading configuration...")
 
             # Check if Exo settings changed
-            if (self.config.exo_base_url != old_exo_base_url or
-                self.config.exo_api_key != old_exo_api_key):
+            if (
+                self.config.exo_base_url != old_exo_base_url
+                or self.config.exo_api_key != old_exo_api_key
+            ):
                 logger.info("Exo settings changed, reinitializing client...")
                 self.client = self._init_openai_client()
 
@@ -409,24 +448,31 @@ class PromptEnricher:
         try:
             model_to_use = self.config.model_name or self._get_running_model()
             if not model_to_use:
-                logger.warning(f"[{thread_name}] No model available, assuming enrichment needed")
+                logger.warning(
+                    f"[{thread_name}] No model available, assuming enrichment needed"
+                )
                 return True
 
             response = self.client.chat.completions.create(
                 model=model_to_use,
                 messages=[
                     {"role": "system", "content": DECISION_SYSTEM_PROMPT},
-                    {"role": "user", "content": DECISION_USER_TEMPLATE.format(prompt=prompt)}
+                    {
+                        "role": "user",
+                        "content": DECISION_USER_TEMPLATE.format(prompt=prompt),
+                    },
                 ],
                 temperature=self.config.decision_temperature,
                 max_tokens=10,
-                timeout=self.config.llm_timeout_seconds
+                timeout=self.config.llm_timeout_seconds,
             )
 
             answer = response.choices[0].message.content.strip().upper()
             needs_enrichment = answer.startswith("YES")
 
-            logger.info(f"[{thread_name}] Enrichment decision: {answer} -> {needs_enrichment}")
+            logger.info(
+                f"[{thread_name}] Enrichment decision: {answer} -> {needs_enrichment}"
+            )
             return needs_enrichment
 
         except Exception as e:
@@ -455,26 +501,26 @@ class PromptEnricher:
             # Query ChromaDB
             results = self.collection.query(
                 query_embeddings=[query_embedding.tolist()],
-                n_results=self.config.chromadb_n_results
+                n_results=self.config.chromadb_n_results,
             )
 
             chunks = []
-            if results['documents'] and results['documents'][0]:
+            if results["documents"] and results["documents"][0]:
                 for doc, metadata, distance in zip(
-                    results['documents'][0],
-                    results['metadatas'][0],
-                    results['distances'][0]
+                    results["documents"][0],
+                    results["metadatas"][0],
+                    results["distances"][0],
                 ):
-                    chunks.append({
-                        'text': doc,
-                        'metadata': metadata,
-                        'distance': distance
-                    })
+                    chunks.append(
+                        {"text": doc, "metadata": metadata, "distance": distance}
+                    )
 
             logger.info(f"[{thread_name}] Retrieved {len(chunks)} chunks from ChromaDB")
             for i, chunk in enumerate(chunks[:3]):  # Log first 3
-                logger.debug(f"[{thread_name}]   Chunk {i+1}: distance={chunk['distance']:.4f}, "
-                           f"source={chunk['metadata'].get('source', 'unknown')}")
+                logger.debug(
+                    f"[{thread_name}]   Chunk {i + 1}: distance={chunk['distance']:.4f}, "
+                    f"source={chunk['metadata'].get('source', 'unknown')}"
+                )
 
             return chunks
 
@@ -494,18 +540,26 @@ class PromptEnricher:
             Tuple of (number of contexts stored, number of duplicates skipped)
         """
         thread_name = threading.current_thread().name
-        logger.info(f"[{thread_name}] Storing {len(chunks)} context chunks for prompt {prompt_id}...")
+        logger.info(
+            f"[{thread_name}] Storing {len(chunks)} context chunks for prompt {prompt_id}..."
+        )
 
         if not chunks:
             logger.warning(f"[{thread_name}] No chunks to store")
             return 0, 0
 
         try:
-            context_ids, skipped = self.context_store.add_contexts_batch(prompt_id, chunks)
+            context_ids, skipped = self.context_store.add_contexts_batch(
+                prompt_id, chunks
+            )
             if skipped > 0:
-                logger.info(f"[{thread_name}] Stored {len(context_ids)} contexts ({skipped} duplicates skipped)")
+                logger.info(
+                    f"[{thread_name}] Stored {len(context_ids)} contexts ({skipped} duplicates skipped)"
+                )
             else:
-                logger.info(f"[{thread_name}] Stored {len(context_ids)} contexts in database")
+                logger.info(
+                    f"[{thread_name}] Stored {len(context_ids)} contexts in database"
+                )
             return len(context_ids), skipped
 
         except Exception as e:
@@ -521,19 +575,27 @@ class PromptEnricher:
         if isinstance(message, str):
             try:
                 parsed = json.loads(message)
-                prompt = parsed.get('text', '') or parsed.get('prompt', '')
-                message_id = parsed.get('id', datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+                prompt = parsed.get("text", "") or parsed.get("prompt", "")
+                message_id = parsed.get(
+                    "id", datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                )
             except json.JSONDecodeError:
                 prompt = message
-                message_id = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                message_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         else:
-            prompt = message.get('text', '') or message.get('prompt', '')
-            message_id = message.get('id', datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+            prompt = message.get("text", "") or message.get("prompt", "")
+            message_id = message.get("id", datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
 
         return prompt, message_id
 
-    def _produce_message(self, prompt: str, message_id: str, original_id: str,
-                        context_available: bool, contexts_stored: int = 0):
+    def _produce_message(
+        self,
+        prompt: str,
+        message_id: str,
+        original_id: str,
+        context_available: bool,
+        contexts_stored: int = 0,
+    ):
         """Produce message to output topic"""
         thread_name = threading.current_thread().name
 
@@ -543,14 +605,18 @@ class PromptEnricher:
             "original_id": original_id,
             "context_available": context_available,
             "contexts_stored": contexts_stored,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
 
         try:
             self.producer.send(self.config.kafka_output_topic, value=output_message)
             self.producer.flush()
-            logger.info(f"[{thread_name}] Produced message to '{self.config.kafka_output_topic}'")
-            logger.info(f"[{thread_name}]   context_available={context_available}, contexts_stored={contexts_stored}")
+            logger.info(
+                f"[{thread_name}] Produced message to '{self.config.kafka_output_topic}'"
+            )
+            logger.info(
+                f"[{thread_name}]   context_available={context_available}, contexts_stored={contexts_stored}"
+            )
         except Exception as e:
             logger.error(f"[{thread_name}] Failed to produce message: {e}")
             raise
@@ -564,20 +630,22 @@ class PromptEnricher:
             # Broca expects {"text": "...", "id": "..."} format
             broca_message = {
                 "text": message,
-                "id": f"enrichener_status_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+                "id": f"enrichener_status_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
             }
             self.producer.send(self.config.kafka_broca_topic, value=broca_message)
             self.producer.flush()
-            logger.info(f"[{thread_name}] Status message sent to '{self.config.kafka_broca_topic}'")
+            logger.info(
+                f"[{thread_name}] Status message sent to '{self.config.kafka_broca_topic}'"
+            )
         except Exception as e:
             logger.error(f"[{thread_name}] Failed to send status message to Broca: {e}")
 
     def process_message(self, message):
         """Process a single message through the context retrieval pipeline"""
         thread_name = threading.current_thread().name
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info(f"[{thread_name}] STARTING MESSAGE PROCESSING")
-        logger.info("="*60)
+        logger.info("=" * 60)
 
         try:
             # Step 1: Parse message
@@ -589,13 +657,17 @@ class PromptEnricher:
                 return
 
             logger.info(f"[{thread_name}]   Message ID: {message_id}")
-            logger.info(f"[{thread_name}]   Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
+            logger.info(
+                f"[{thread_name}]   Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}"
+            )
 
             # Notify user via Broca that context retrieval is starting
             self._notify_broca("Retrieving context, one moment...")
 
             # Step 2: Decide if context retrieval is needed
-            logger.info(f"[{thread_name}] STEP 2/4: Checking if context retrieval needed...")
+            logger.info(
+                f"[{thread_name}] STEP 2/4: Checking if context retrieval needed..."
+            )
             try:
                 needs_context = self.decide_needs_enrichment(prompt)
             except Exception as e:
@@ -616,26 +688,39 @@ class PromptEnricher:
                 chunks = []
 
             if not chunks:
-                logger.info(f"[{thread_name}] No relevant chunks found, forwarding prompt...")
+                logger.info(
+                    f"[{thread_name}] No relevant chunks found, forwarding prompt..."
+                )
                 self._produce_message(prompt, message_id, message_id, False)
                 return
 
             # Step 4: Store contexts in database and forward original prompt
-            logger.info(f"[{thread_name}] STEP 4/4: Storing contexts and forwarding prompt...")
-            contexts_stored, duplicates_skipped = self.store_contexts(message_id, chunks)
+            logger.info(
+                f"[{thread_name}] STEP 4/4: Storing contexts and forwarding prompt..."
+            )
+            contexts_stored, duplicates_skipped = self.store_contexts(
+                message_id, chunks
+            )
 
             if duplicates_skipped > 0:
-                logger.info(f"[{thread_name}] Stored {contexts_stored} contexts ({duplicates_skipped} duplicates skipped), forwarding original prompt")
+                logger.info(
+                    f"[{thread_name}] Stored {contexts_stored} contexts ({duplicates_skipped} duplicates skipped), forwarding original prompt"
+                )
             else:
-                logger.info(f"[{thread_name}] Stored {contexts_stored} contexts, forwarding original prompt")
+                logger.info(
+                    f"[{thread_name}] Stored {contexts_stored} contexts, forwarding original prompt"
+                )
             self._produce_message(prompt, message_id, message_id, True, contexts_stored)
 
-            logger.info("="*60)
+            logger.info("=" * 60)
             logger.info(f"[{thread_name}] MESSAGE PROCESSING COMPLETE")
-            logger.info("="*60)
+            logger.info("=" * 60)
 
         except Exception as e:
-            logger.error(f"[{thread_name}] Unexpected error in process_message: {e}", exc_info=True)
+            logger.error(
+                f"[{thread_name}] Unexpected error in process_message: {e}",
+                exc_info=True,
+            )
             # Try to pass through on any unexpected error
             try:
                 prompt, message_id = self._extract_prompt_and_id(message)
@@ -658,11 +743,16 @@ class PromptEnricher:
             self.process_message(message_value)
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
-            logger.info(f"[{thread_name}] Successfully processed message #{message_count} in {duration:.2f}s")
+            logger.info(
+                f"[{thread_name}] Successfully processed message #{message_count} in {duration:.2f}s"
+            )
         except Exception as e:
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
-            logger.error(f"[{thread_name}] Failed to process message #{message_count}: {e}", exc_info=True)
+            logger.error(
+                f"[{thread_name}] Failed to process message #{message_count}: {e}",
+                exc_info=True,
+            )
 
     def _cleanup_completed_futures(self):
         """Remove completed futures from the active list"""
@@ -671,7 +761,9 @@ class PromptEnricher:
         after_count = len(self.active_futures)
         cleaned = before_count - after_count
         if cleaned > 0:
-            logger.info(f"[CLEANUP] Removed {cleaned} completed futures ({before_count} -> {after_count})")
+            logger.info(
+                f"[CLEANUP] Removed {cleaned} completed futures ({before_count} -> {after_count})"
+            )
 
     # =========================================================================
     # MAIN CONSUMER LOOP
@@ -679,15 +771,15 @@ class PromptEnricher:
 
     def start(self):
         """Start consuming messages"""
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info("STARTING ENRICHENER CONSUMER")
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info(f"Consumer topic: {self.config.kafka_input_topic}")
         logger.info(f"Producer topic: {self.config.kafka_output_topic}")
         logger.info(f"Consumer group: {self.config.kafka_consumer_group}")
         logger.info("Using threaded processing to prevent Kafka rebalancing")
         logger.info("Waiting for prompts...")
-        logger.info("="*60)
+        logger.info("=" * 60)
 
         message_count = 0
 
@@ -706,27 +798,31 @@ class PromptEnricher:
                 logger.info(f"[MAIN THREAD]   Topic: {message.topic}")
                 logger.info(f"[MAIN THREAD]   Partition: {message.partition}")
                 logger.info(f"[MAIN THREAD]   Offset: {message.offset}")
-                logger.info(f"[MAIN THREAD]   Value preview: {str(message.value)[:100]}...")
+                logger.info(
+                    f"[MAIN THREAD]   Value preview: {str(message.value)[:100]}..."
+                )
 
                 # Check for config changes
                 self._check_config_reload()
 
                 # Submit to thread pool
                 message_metadata = {
-                    'topic': message.topic,
-                    'partition': message.partition,
-                    'offset': message.offset
+                    "topic": message.topic,
+                    "partition": message.partition,
+                    "offset": message.offset,
                 }
 
                 future = self.executor.submit(
                     self._process_message_wrapper,
                     message.value,
                     message_count,
-                    message_metadata
+                    message_metadata,
                 )
                 self.active_futures.append(future)
 
-                logger.info(f"[MAIN THREAD] Submitted message #{message_count} to thread pool")
+                logger.info(
+                    f"[MAIN THREAD] Submitted message #{message_count} to thread pool"
+                )
                 logger.info(f"[MAIN THREAD] Active workers: {len(self.active_futures)}")
 
                 # Periodic cleanup
@@ -747,7 +843,9 @@ class PromptEnricher:
             # Wait for in-flight messages
             in_flight = len(self.active_futures)
             if in_flight > 0:
-                logger.info(f"[SHUTDOWN] Waiting for {in_flight} in-flight message(s)...")
+                logger.info(
+                    f"[SHUTDOWN] Waiting for {in_flight} in-flight message(s)..."
+                )
                 for i, future in enumerate(self.active_futures, 1):
                     try:
                         future.result(timeout=30)
@@ -773,9 +871,9 @@ class PromptEnricher:
 # =============================================================================
 
 if __name__ == "__main__":
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("ENRICHENER APPLICATION STARTING")
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info(f"Python version: {sys.version}")
     logger.info(f"Working directory: {os.getcwd()}")
 
@@ -784,12 +882,12 @@ if __name__ == "__main__":
         enricher = PromptEnricher(config)
         enricher.start()
     except Exception as e:
-        logger.error("="*60)
+        logger.error("=" * 60)
         logger.error("FATAL ERROR DURING STARTUP")
-        logger.error("="*60)
+        logger.error("=" * 60)
         logger.error(f"Error: {e}", exc_info=True)
         raise
 
-    logger.info("="*60)
+    logger.info("=" * 60)
     logger.info("ENRICHENER APPLICATION EXITING")
-    logger.info("="*60)
+    logger.info("=" * 60)

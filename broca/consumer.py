@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 from libs.olorin_logging import OlorinLogger
 
@@ -16,10 +16,10 @@ from TTS.api import TTS
 config = Config(watch=True)
 
 # Set up logging
-default_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-log_dir = config.get('LOG_DIR', default_log_dir)
-log_file = os.path.join(log_dir, 'broca-consumer.log')
-env_log_level = config.get('LOG_LEVEL', 'INFO')
+default_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+log_dir = config.get("LOG_DIR", default_log_dir)
+log_file = os.path.join(log_dir, "broca-consumer.log")
+env_log_level = config.get("LOG_LEVEL", "INFO")
 
 # Initialize logger
 logger = OlorinLogger(log_file=log_file, log_level=env_log_level, name=__name__)
@@ -27,20 +27,23 @@ logger = OlorinLogger(log_file=log_file, log_level=env_log_level, name=__name__)
 
 class BrocaConfig:
     """Configuration wrapper for Broca consumer"""
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self._load()
 
     def _load(self):
         """Load configuration values from Config"""
-        self.bootstrap_servers = self.cfg.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
-        self.topic = self.cfg.get('BROCA_KAFKA_TOPIC', 'ai_out')
-        self.tts_model_name = self.cfg.get('TTS_MODEL_NAME', 'tts_models/en/vctk/vits')
-        self.tts_speaker = self.cfg.get('TTS_SPEAKER', 'p225')
-        self.consumer_group = self.cfg.get('BROCA_CONSUMER_GROUP', 'tts-consumer-group')
-        self.auto_offset_reset = self.cfg.get('BROCA_AUTO_OFFSET_RESET', 'earliest')
-        self.output_dir = self.cfg.get('TTS_OUTPUT_DIR', 'output')
-        self.log_level = self.cfg.get('LOG_LEVEL', 'INFO')
+        self.bootstrap_servers = self.cfg.get(
+            "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+        )
+        self.topic = self.cfg.get("BROCA_KAFKA_TOPIC", "ai_out")
+        self.tts_model_name = self.cfg.get("TTS_MODEL_NAME", "tts_models/en/vctk/vits")
+        self.tts_speaker = self.cfg.get("TTS_SPEAKER", "p225")
+        self.consumer_group = self.cfg.get("BROCA_CONSUMER_GROUP", "tts-consumer-group")
+        self.auto_offset_reset = self.cfg.get("BROCA_AUTO_OFFSET_RESET", "earliest")
+        self.output_dir = self.cfg.get("TTS_OUTPUT_DIR", "output")
+        self.log_level = self.cfg.get("LOG_LEVEL", "INFO")
 
     def reload(self) -> bool:
         """Check for config changes and reload if needed"""
@@ -56,9 +59,11 @@ def load_config() -> BrocaConfig:
 
     # Update logging level
     import logging
+
     logger.setLevel(getattr(logging, broca_cfg.log_level.upper(), logging.INFO))
 
     return broca_cfg
+
 
 class TTSConsumer:
     def __init__(self, config: BrocaConfig):
@@ -71,10 +76,10 @@ class TTSConsumer:
         self.consumer = KafkaConsumer(
             config.topic,
             bootstrap_servers=config.bootstrap_servers,
-            value_deserializer=lambda m: m.decode('utf-8'),
+            value_deserializer=lambda m: m.decode("utf-8"),
             auto_offset_reset=config.auto_offset_reset,
             enable_auto_commit=True,
-            group_id=config.consumer_group
+            group_id=config.consumer_group,
         )
 
         # Initialize TTS model
@@ -90,7 +95,7 @@ class TTSConsumer:
         logger.info("TTS model loaded successfully")
 
         # Log available speakers if multi-speaker model
-        if hasattr(tts, 'speakers') and tts.speakers:
+        if hasattr(tts, "speakers") and tts.speakers:
             logger.info(f"Available speakers: {tts.speakers}")
             logger.info(f"Using speaker: {config.tts_speaker}")
 
@@ -106,8 +111,10 @@ class TTSConsumer:
             logger.info("Detected .env file change, reloading configuration...")
 
             # Check if TTS settings changed
-            if (self.config.tts_model_name != old_tts_model or
-                self.config.tts_speaker != old_tts_speaker):
+            if (
+                self.config.tts_model_name != old_tts_model
+                or self.config.tts_speaker != old_tts_speaker
+            ):
                 logger.info("TTS settings changed, reinitializing model...")
                 self.tts = self._init_tts_model(self.config)
 
@@ -116,7 +123,7 @@ class TTSConsumer:
                 os.makedirs(self.config.output_dir, exist_ok=True)
 
             logger.info("Configuration reloaded successfully")
-    
+
     def process_message(self, message):
         """Process a single message and convert to speech"""
         try:
@@ -124,17 +131,19 @@ class TTSConsumer:
             if isinstance(message, str):
                 try:
                     parsed = json.loads(message)
-                    text = parsed.get('text', '')
-                    message_id = parsed.get('id', datetime.now().strftime('%Y%m%d_%H%M%S'))
+                    text = parsed.get("text", "")
+                    message_id = parsed.get(
+                        "id", datetime.now().strftime("%Y%m%d_%H%M%S")
+                    )
                 except json.JSONDecodeError:
                     # Treat as plain text
                     logger.info("Received plain text message, treating as text")
                     text = message
-                    message_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    message_id = datetime.now().strftime("%Y%m%d_%H%M%S")
             else:
                 # Already a dict
-                text = message.get('text', '')
-                message_id = message.get('id', datetime.now().strftime('%Y%m%d_%H%M%S'))
+                text = message.get("text", "")
+                message_id = message.get("id", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
             if not text:
                 logger.warning(f"Empty text in message: {message}")
@@ -154,8 +163,10 @@ class TTSConsumer:
             output_path = f"{self.config.output_dir}/{message_id}.wav"
 
             # Use speaker parameter if model supports it
-            if hasattr(self.tts, 'speakers') and self.tts.speakers:
-                self.tts.tts_to_file(text=text, file_path=output_path, speaker=self.config.tts_speaker)
+            if hasattr(self.tts, "speakers") and self.tts.speakers:
+                self.tts.tts_to_file(
+                    text=text, file_path=output_path, speaker=self.config.tts_speaker
+                )
             else:
                 self.tts.tts_to_file(text=text, file_path=output_path)
 
@@ -176,7 +187,7 @@ class TTSConsumer:
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             self.is_playing = False
-    
+
     def start(self):
         """Start consuming messages"""
         logger.info(f"Starting consumer for topic: {self.config.topic}")
@@ -193,6 +204,7 @@ class TTSConsumer:
             logger.info("Shutting down consumer...")
         finally:
             self.consumer.close()
+
 
 if __name__ == "__main__":
     config = load_config()

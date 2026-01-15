@@ -18,13 +18,13 @@ from collections import Counter
 
 def calculate_hash(content):
     """Calculate SHA256 hash of content."""
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def read_markdown_file(file_path):
     """Read the markdown file and return its content."""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return f.read()
     except Exception as e:
         print(f"Error reading file: {e}", file=sys.stderr)
@@ -36,7 +36,7 @@ def detect_repetitive_lines(content, threshold=3):
     Detect lines that repeat more than threshold times.
     Returns a set of lines that are considered repetitive.
     """
-    lines = content.split('\n')
+    lines = content.split("\n")
     # Filter out empty lines and very short lines (< 10 chars)
     meaningful_lines = [line.strip() for line in lines if len(line.strip()) > 10]
 
@@ -56,7 +56,7 @@ def remove_repetitive_content(content, repetitive_lines):
     if not repetitive_lines:
         return content
 
-    lines = content.split('\n')
+    lines = content.split("\n")
     seen_repetitive = set()
     filtered_lines = []
 
@@ -70,7 +70,7 @@ def remove_repetitive_content(content, repetitive_lines):
         else:
             filtered_lines.append(line)
 
-    return '\n'.join(filtered_lines)
+    return "\n".join(filtered_lines)
 
 
 def chunk_content(content, chunk_size=4000):
@@ -79,7 +79,7 @@ def chunk_content(content, chunk_size=4000):
     Tries to split on paragraph boundaries to maintain context.
     """
     # Split on double newlines (paragraph boundaries)
-    paragraphs = re.split(r'\n\n+', content)
+    paragraphs = re.split(r"\n\n+", content)
 
     chunks = []
     current_chunk = []
@@ -90,7 +90,7 @@ def chunk_content(content, chunk_size=4000):
 
         if current_size + para_size > chunk_size and current_chunk:
             # Save current chunk and start a new one
-            chunks.append('\n\n'.join(current_chunk))
+            chunks.append("\n\n".join(current_chunk))
             current_chunk = [para]
             current_size = para_size
         else:
@@ -99,7 +99,7 @@ def chunk_content(content, chunk_size=4000):
 
     # Add the last chunk
     if current_chunk:
-        chunks.append('\n\n'.join(current_chunk))
+        chunks.append("\n\n".join(current_chunk))
 
     return chunks
 
@@ -107,19 +107,15 @@ def chunk_content(content, chunk_size=4000):
 def get_ollama_path():
     """Find the ollama binary path."""
     paths = [
-        'ollama',
-        '/usr/local/bin/ollama',
-        '/opt/homebrew/bin/ollama',
-        '/Applications/Ollama.app/Contents/Resources/ollama',
+        "ollama",
+        "/usr/local/bin/ollama",
+        "/opt/homebrew/bin/ollama",
+        "/Applications/Ollama.app/Contents/Resources/ollama",
     ]
 
     for path in paths:
         try:
-            result = subprocess.run(
-                [path, '--version'],
-                capture_output=True,
-                timeout=2
-            )
+            result = subprocess.run([path, "--version"], capture_output=True, timeout=2)
             if result.returncode == 0:
                 return path
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -132,7 +128,8 @@ def clean_with_ollama(chunk, model="llama3.2"):
     """
     Send a chunk to Ollama for cleaning using CLI.
     """
-    prompt = """You are a markdown content cleaner. Your task is to clean and improve markdown content by:
+    prompt = (
+        """You are a markdown content cleaner. Your task is to clean and improve markdown content by:
 
 1. Identifying headers/headings that aren't properly marked with # symbols and marking them correctly
 2. Removing or minimizing table of contents sections (they add clutter)
@@ -144,25 +141,32 @@ Return ONLY the cleaned markdown content. Do not add explanations or comments ab
 
 Content to clean:
 
-""" + chunk
+"""
+        + chunk
+    )
 
     ollama_path = get_ollama_path()
     if not ollama_path:
-        print("Error: Could not find Ollama. Make sure it is installed.", file=sys.stderr)
+        print(
+            "Error: Could not find Ollama. Make sure it is installed.", file=sys.stderr
+        )
         sys.exit(1)
 
     try:
         result = subprocess.run(
-            [ollama_path, 'run', model, prompt],
+            [ollama_path, "run", model, prompt],
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=120,
         )
 
         if result.returncode == 0:
             return result.stdout.strip()
         else:
-            print(f"Error: Ollama returned error code {result.returncode}", file=sys.stderr)
+            print(
+                f"Error: Ollama returned error code {result.returncode}",
+                file=sys.stderr,
+            )
             if result.stderr:
                 print(f"Error message: {result.stderr}", file=sys.stderr)
             return chunk
@@ -175,7 +179,9 @@ Content to clean:
         return chunk
 
 
-def clean_markdown(file_path, model="llama3.2", chunk_size=4000, repetition_threshold=3):
+def clean_markdown(
+    file_path, model="llama3.2", chunk_size=4000, repetition_threshold=3
+):
     """
     Main function to clean a markdown file.
     """
@@ -201,46 +207,49 @@ def clean_markdown(file_path, model="llama3.2", chunk_size=4000, repetition_thre
 
     cleaned_chunks = []
     for i, chunk in enumerate(chunks, 1):
-        print(f"Processing chunk {i}/{len(chunks)}... ", end='', flush=True)
+        print(f"Processing chunk {i}/{len(chunks)}... ", end="", flush=True)
         cleaned = clean_with_ollama(chunk, model=model)
         cleaned_chunks.append(cleaned)
         print("done")
 
     # Combine chunks
-    cleaned_content = '\n\n'.join(cleaned_chunks)
+    cleaned_content = "\n\n".join(cleaned_chunks)
 
     print(f"\nFinal cleaned size: {len(cleaned_content)} characters")
-    print(f"Reduction: {len(content) - len(cleaned_content)} characters ({100 * (1 - len(cleaned_content)/len(content)):.1f}%)")
+    print(
+        f"Reduction: {len(content) - len(cleaned_content)} characters ({100 * (1 - len(cleaned_content) / len(content)):.1f}%)"
+    )
 
     return cleaned_content
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Clean markdown files using Ollama to remove low-quality content'
+        description="Clean markdown files using Ollama to remove low-quality content"
     )
     parser.add_argument(
-        'file_path',
+        "file_path", type=str, help="Absolute path to the markdown file to clean"
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
         type=str,
-        help='Absolute path to the markdown file to clean'
+        default="llama3.2",
+        help="Ollama model to use (default: llama3.2)",
     )
     parser.add_argument(
-        '-m', '--model',
-        type=str,
-        default='llama3.2',
-        help='Ollama model to use (default: llama3.2)'
-    )
-    parser.add_argument(
-        '-c', '--chunk-size',
+        "-c",
+        "--chunk-size",
         type=int,
         default=4000,
-        help='Maximum chunk size in characters (default: 4000)'
+        help="Maximum chunk size in characters (default: 4000)",
     )
     parser.add_argument(
-        '-r', '--repetition-threshold',
+        "-r",
+        "--repetition-threshold",
         type=int,
         default=3,
-        help='Number of repetitions before a line is considered repetitive (default: 3)'
+        help="Number of repetitions before a line is considered repetitive (default: 3)",
     )
 
     args = parser.parse_args()
@@ -265,7 +274,7 @@ def main():
         args.file_path,
         model=args.model,
         chunk_size=args.chunk_size,
-        repetition_threshold=args.repetition_threshold
+        repetition_threshold=args.repetition_threshold,
     )
 
     # Calculate hash of cleaned content
@@ -282,10 +291,7 @@ def main():
     # Write to temporary file first
     try:
         with tempfile.NamedTemporaryFile(
-            mode='w',
-            encoding='utf-8',
-            suffix='.md',
-            delete=False
+            mode="w", encoding="utf-8", suffix=".md", delete=False
         ) as temp_file:
             temp_path = temp_file.name
             temp_file.write(cleaned_content)
@@ -298,10 +304,10 @@ def main():
     except Exception as e:
         print(f"Error writing output file: {e}", file=sys.stderr)
         # Clean up temp file if it exists
-        if 'temp_path' in locals() and Path(temp_path).exists():
+        if "temp_path" in locals() and Path(temp_path).exists():
             Path(temp_path).unlink()
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

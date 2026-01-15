@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Run the chat TUI from the project root
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+cd "$PROJECT_ROOT" || exit 1
+
+exec "$SCRIPT_DIR/target/release/olorin-chat" "$@"

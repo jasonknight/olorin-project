@@ -84,13 +84,15 @@ class ContextStore:
     @staticmethod
     def _compute_hash(content: str) -> str:
         """Compute SHA-256 hash of content for deduplication."""
-        return hashlib.sha256(content.encode('utf-8')).hexdigest()
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-    def _context_exists(self, conn: sqlite3.Connection, prompt_id: str, content_hash: str) -> bool:
+    def _context_exists(
+        self, conn: sqlite3.Connection, prompt_id: str, content_hash: str
+    ) -> bool:
         """Check if a context with the same hash already exists for this prompt."""
         cursor = conn.execute(
             "SELECT 1 FROM contexts WHERE prompt_id = ? AND content_hash = ? LIMIT 1",
-            (prompt_id, content_hash)
+            (prompt_id, content_hash),
         )
         return cursor.fetchone() is not None
 
@@ -103,7 +105,7 @@ class ContextStore:
         h2: Optional[str] = None,
         h3: Optional[str] = None,
         chunk_index: Optional[int] = None,
-        distance: Optional[float] = None
+        distance: Optional[float] = None,
     ) -> Optional[str]:
         """
         Add a context chunk to the database if it doesn't already exist.
@@ -137,8 +139,19 @@ class ContextStore:
                 (id, prompt_id, content, content_hash, source, h1, h2, h3, chunk_index, distance, added_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (context_id, prompt_id, content, content_hash, source, h1, h2, h3,
-                 chunk_index, distance, added_at)
+                (
+                    context_id,
+                    prompt_id,
+                    content,
+                    content_hash,
+                    source,
+                    h1,
+                    h2,
+                    h3,
+                    chunk_index,
+                    distance,
+                    added_at,
+                ),
             )
             conn.commit()
 
@@ -146,9 +159,7 @@ class ContextStore:
         return context_id
 
     def add_contexts_batch(
-        self,
-        prompt_id: str,
-        chunks: List[Dict]
+        self, prompt_id: str, chunks: List[Dict]
     ) -> Tuple[List[str], int]:
         """
         Add multiple context chunks in a single transaction, skipping duplicates.
@@ -166,7 +177,7 @@ class ContextStore:
 
         with sqlite3.connect(self.db_path) as conn:
             for chunk in chunks:
-                content = chunk.get('text', '')
+                content = chunk.get("text", "")
                 content_hash = self._compute_hash(content)
 
                 # Check for duplicate
@@ -175,7 +186,7 @@ class ContextStore:
                     continue
 
                 context_id = str(uuid.uuid4())
-                metadata = chunk.get('metadata', {})
+                metadata = chunk.get("metadata", {})
 
                 conn.execute(
                     """
@@ -188,21 +199,23 @@ class ContextStore:
                         prompt_id,
                         content,
                         content_hash,
-                        metadata.get('source'),
-                        metadata.get('h1'),
-                        metadata.get('h2'),
-                        metadata.get('h3'),
-                        metadata.get('chunk_index'),
-                        chunk.get('distance'),
-                        added_at
-                    )
+                        metadata.get("source"),
+                        metadata.get("h1"),
+                        metadata.get("h2"),
+                        metadata.get("h3"),
+                        metadata.get("chunk_index"),
+                        chunk.get("distance"),
+                        added_at,
+                    ),
                 )
                 context_ids.append(context_id)
 
             conn.commit()
 
         if skipped > 0:
-            logger.info(f"Added {len(context_ids)} contexts for prompt {prompt_id} ({skipped} duplicates skipped)")
+            logger.info(
+                f"Added {len(context_ids)} contexts for prompt {prompt_id} ({skipped} duplicates skipped)"
+            )
         else:
             logger.info(f"Added {len(context_ids)} contexts for prompt {prompt_id}")
         return context_ids, skipped
@@ -227,7 +240,7 @@ class ContextStore:
                 WHERE prompt_id = ?
                 ORDER BY distance ASC NULLS LAST
                 """,
-                (prompt_id,)
+                (prompt_id,),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -250,7 +263,7 @@ class ContextStore:
                 FROM contexts
                 WHERE id = ?
                 """,
-                (context_id,)
+                (context_id,),
             )
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -267,8 +280,7 @@ class ContextStore:
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "DELETE FROM contexts WHERE prompt_id = ?",
-                (prompt_id,)
+                "DELETE FROM contexts WHERE prompt_id = ?", (prompt_id,)
             )
             conn.commit()
             deleted = cursor.rowcount
@@ -289,14 +301,12 @@ class ContextStore:
         cutoff = datetime.now().isoformat()
         # Calculate cutoff time
         from datetime import timedelta
+
         cutoff_time = datetime.now() - timedelta(hours=older_than_hours)
         cutoff = cutoff_time.isoformat()
 
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "DELETE FROM contexts WHERE added_at < ?",
-                (cutoff,)
-            )
+            cursor = conn.execute("DELETE FROM contexts WHERE added_at < ?", (cutoff,))
             conn.commit()
             deleted = cursor.rowcount
 
@@ -325,11 +335,11 @@ class ContextStore:
             row = cursor.fetchone()
 
             return {
-                'total_contexts': row[0] or 0,
-                'unique_prompts': row[1] or 0,
-                'unique_sources': row[2] or 0,
-                'oldest': row[3],
-                'newest': row[4]
+                "total_contexts": row[0] or 0,
+                "unique_prompts": row[1] or 0,
+                "unique_sources": row[2] or 0,
+                "oldest": row[3],
+                "newest": row[4],
             }
 
     def clear_all(self) -> int:

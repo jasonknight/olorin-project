@@ -44,7 +44,12 @@
       "min_size": 100
     },
     "poll_interval": 5,
-    "tracking_db": "./data/tracking.db",
+    "tracking_db": "./hippocampus/data/tracking.db",
+    "pdf_tracking_db": "./hippocampus/data/pdf_tracking.db",
+    "ebook_tracking_db": "./hippocampus/data/ebook_tracking.db",
+    "txt_tracking_db": "./hippocampus/data/txt_tracking.db",
+    "office_tracking_db": "./hippocampus/data/office_tracking.db",
+    "context_db": "./hippocampus/data/context.db",
     "reprocess_on_change": true,
     "delete_after_processing": false,
     "log_file": "./data/ingest.log"
@@ -58,7 +63,7 @@
     "llm_timeout_seconds": 120,
     "decision_temperature": 0.1,
     "chromadb_query_n_results": 10,
-    "context_db_path": "./data/context.db",
+    "context_db_path": "./hippocampus/data/context.db",
     "cleanup_context_after_use": true
   },
   "chat": {

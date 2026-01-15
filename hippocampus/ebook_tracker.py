@@ -12,19 +12,19 @@ import re
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Optional, Set, Tuple
-from datetime import datetime
-from collections import Counter
+from typing import List, Dict, Optional, Tuple
 from html.parser import HTMLParser
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.olorin_logging import OlorinLogger
+from libs.config import Config
 
 # Try to import ebooklib for EPUB support
 try:
     import ebooklib
     from ebooklib import epub
+
     EPUB_AVAILABLE = True
 except ImportError:
     print("ebooklib not found. Installing...")
@@ -32,6 +32,7 @@ except ImportError:
     try:
         import ebooklib
         from ebooklib import epub
+
         EPUB_AVAILABLE = True
     except ImportError:
         EPUB_AVAILABLE = False
@@ -40,12 +41,14 @@ except ImportError:
 # Try to import mobi for MOBI support
 try:
     import mobi
+
     MOBI_AVAILABLE = True
 except ImportError:
     print("mobi not found. Installing...")
     os.system(f"{sys.executable} -m pip install mobi")
     try:
         import mobi
+
         MOBI_AVAILABLE = True
     except ImportError:
         MOBI_AVAILABLE = False
@@ -67,27 +70,27 @@ class HTMLStripper(HTMLParser):
         self.in_script = False
 
     def handle_starttag(self, tag, attrs):
-        if tag == 'style':
+        if tag == "style":
             self.in_style = True
-        elif tag == 'script':
+        elif tag == "script":
             self.in_script = True
-        elif tag in ('p', 'div', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'):
-            self.text.append('\n')
+        elif tag in ("p", "div", "br", "h1", "h2", "h3", "h4", "h5", "h6", "li"):
+            self.text.append("\n")
 
     def handle_endtag(self, tag):
-        if tag == 'style':
+        if tag == "style":
             self.in_style = False
-        elif tag == 'script':
+        elif tag == "script":
             self.in_script = False
-        elif tag in ('p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-            self.text.append('\n')
+        elif tag in ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self.text.append("\n")
 
     def handle_data(self, data):
         if not self.in_style and not self.in_script:
             self.text.append(data)
 
     def get_text(self):
-        return ''.join(self.text)
+        return "".join(self.text)
 
 
 def strip_html(html_content: str) -> str:
@@ -98,9 +101,16 @@ def strip_html(html_content: str) -> str:
         return stripper.get_text()
     except Exception:
         # Fallback: simple regex-based stripping
-        text = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(
+            r"<style[^>]*>.*?</style>",
+            "",
+            html_content,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        text = re.sub(
+            r"<script[^>]*>.*?</script>", "", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        text = re.sub(r"<[^>]+>", " ", text)
         return text
 
 
@@ -111,9 +121,9 @@ class EbookTracker:
 
     def __init__(
         self,
-        input_dir: str = "~/Documents/AI_IN",
+        input_dir: str = None,
         output_dir: str = None,
-        tracking_db: str = "./data/ebook_tracking.db",
+        tracking_db: str = None,
         poll_interval: int = 5,
         reprocess_on_change: bool = True,
         min_chapter_chars: int = 100,
@@ -122,15 +132,15 @@ class EbookTracker:
         ollama_model: str = "llama3.2:1b",
         ollama_threshold: float = 0.5,
         include_metadata: bool = True,
-        force_reprocess_pattern: str = None
+        force_reprocess_pattern: str = None,
     ):
         """
         Initialize Ebook tracker.
 
         Args:
-            input_dir: Directory to monitor for ebooks
+            input_dir: Directory to monitor for ebooks (default from config)
             output_dir: Directory to save markdown files (defaults to input_dir)
-            tracking_db: Path to SQLite tracking database
+            tracking_db: Path to SQLite tracking database (default from config)
             poll_interval: Seconds between directory scans
             reprocess_on_change: Reprocess if ebook content changes
             min_chapter_chars: Minimum characters for chapter to be considered
@@ -141,8 +151,19 @@ class EbookTracker:
             include_metadata: Include YAML frontmatter with document metadata
             force_reprocess_pattern: Regex pattern to match filenames for forced reprocessing
         """
+        # Get paths from config if not provided
+        config = Config()
+        if input_dir is None:
+            input_dir = config.get_path("INPUT_DIR", "~/Documents/AI_IN")
+        if tracking_db is None:
+            tracking_db = config.get_path(
+                "EBOOK_TRACKING_DB", "./hippocampus/data/ebook_tracking.db"
+            )
+
         self.input_dir = os.path.expanduser(input_dir)
-        self.output_dir = os.path.expanduser(output_dir) if output_dir else self.input_dir
+        self.output_dir = (
+            os.path.expanduser(output_dir) if output_dir else self.input_dir
+        )
         self.poll_interval = poll_interval
         self.reprocess_on_change = reprocess_on_change
 
@@ -160,12 +181,16 @@ class EbookTracker:
             try:
                 self.force_reprocess_regex = re.compile(force_reprocess_pattern)
             except re.error as e:
-                raise ValueError(f"Invalid regex pattern: {force_reprocess_pattern} - {e}")
+                raise ValueError(
+                    f"Invalid regex pattern: {force_reprocess_pattern} - {e}"
+                )
 
         # Setup logging
-        default_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'logs')
-        log_file = os.path.join(default_log_dir, 'hippocampus-ebook-tracker.log')
-        self.logger = OlorinLogger(log_file=log_file, log_level='INFO', name=__name__)
+        default_log_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "logs"
+        )
+        log_file = os.path.join(default_log_dir, "hippocampus-ebook-tracker.log")
+        self.logger = OlorinLogger(log_file=log_file, log_level="INFO", name=__name__)
 
         # Check Ollama availability
         self.ollama_available = False
@@ -174,7 +199,9 @@ class EbookTracker:
             if self.ollama_available:
                 self.logger.info(f"Ollama detected - using model: {self.ollama_model}")
             else:
-                self.logger.warning("Ollama not available - falling back to heuristics only")
+                self.logger.warning(
+                    "Ollama not available - falling back to heuristics only"
+                )
 
         # Create directories if they don't exist
         os.makedirs(self.input_dir, exist_ok=True)
@@ -184,7 +211,7 @@ class EbookTracker:
         self.file_tracker = FileTracker(tracking_db)
 
         # Log availability
-        self.logger.info(f"Ebook Tracker initialized")
+        self.logger.info("Ebook Tracker initialized")
         self.logger.info(f"Monitoring directory: {self.input_dir}")
         self.logger.info(f"Output directory: {self.output_dir}")
         self.logger.info(f"EPUB support: {'enabled' if EPUB_AVAILABLE else 'disabled'}")
@@ -230,18 +257,16 @@ class EbookTracker:
             Path to ollama binary or None
         """
         paths = [
-            'ollama',
-            '/usr/local/bin/ollama',
-            '/opt/homebrew/bin/ollama',
-            '/Applications/Ollama.app/Contents/Resources/ollama',
+            "ollama",
+            "/usr/local/bin/ollama",
+            "/opt/homebrew/bin/ollama",
+            "/Applications/Ollama.app/Contents/Resources/ollama",
         ]
 
         for path in paths:
             try:
                 result = subprocess.run(
-                    [path, '--version'],
-                    capture_output=True,
-                    timeout=2
+                    [path, "--version"], capture_output=True, timeout=2
                 )
                 if result.returncode == 0:
                     return path
@@ -264,19 +289,16 @@ class EbookTracker:
 
         try:
             result = subprocess.run(
-                [self.ollama_path, 'list'],
-                capture_output=True,
-                text=True,
-                timeout=5
+                [self.ollama_path, "list"], capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
                 if self.ollama_model in result.stdout:
                     return True
                 self.logger.info(f"Pulling Ollama model: {self.ollama_model}")
                 pull_result = subprocess.run(
-                    [self.ollama_path, 'pull', self.ollama_model],
+                    [self.ollama_path, "pull", self.ollama_model],
                     capture_output=True,
-                    timeout=300
+                    timeout=300,
                 )
                 return pull_result.returncode == 0
             return False
@@ -322,11 +344,15 @@ class EbookTracker:
         if density < self.min_content_density:
             return False
 
-        whitespace_ratio = (len(text) - len(text.replace(' ', '').replace('\n', ''))) / len(text) if len(text) > 0 else 0
+        whitespace_ratio = (
+            (len(text) - len(text.replace(" ", "").replace("\n", ""))) / len(text)
+            if len(text) > 0
+            else 0
+        )
         if whitespace_ratio > 0.8:
             return False
 
-        words = re.findall(r'\b\w+\b', cleaned_text)
+        words = re.findall(r"\b\w+\b", cleaned_text)
         if len(words) < 20:
             return False
 
@@ -342,11 +368,11 @@ class EbookTracker:
         Returns:
             Cleaned text
         """
-        text = text.replace('\f', '\n')
-        text = re.sub(r'-\s*\n\s*', '', text)
-        text = re.sub(r'[ \t]+', ' ', text)
-        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
-        text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
+        text = text.replace("\f", "\n")
+        text = re.sub(r"-\s*\n\s*", "", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        text = re.sub(r"^\s*\d+\s*$", "", text, flags=re.MULTILINE)
 
         return text.strip()
 
@@ -361,14 +387,14 @@ class EbookTracker:
             Text with boilerplate removed
         """
         patterns = [
-            r'(?i)^\s*page \d+ of \d+\s*$',
-            r'(?i)^\s*confidential\s*$',
-            r'(?i)^\s*copyright ©.*$',
-            r'(?i)^\s*all rights reserved.*$',
+            r"(?i)^\s*page \d+ of \d+\s*$",
+            r"(?i)^\s*confidential\s*$",
+            r"(?i)^\s*copyright ©.*$",
+            r"(?i)^\s*all rights reserved.*$",
         ]
 
         for pattern in patterns:
-            text = re.sub(pattern, '', text, flags=re.MULTILINE)
+            text = re.sub(pattern, "", text, flags=re.MULTILINE)
 
         return text
 
@@ -383,7 +409,7 @@ class EbookTracker:
             Tuple of (is_boilerplate, content_type)
         """
         if not self.ollama_available:
-            return False, 'unknown'
+            return False, "unknown"
 
         text_sample = text[:800] if len(text) > 800 else text
 
@@ -401,27 +427,27 @@ Respond with ONLY one word: TOC, COPYRIGHT, SUBSTANTIVE, or UNKNOWN"""
 
         try:
             result = subprocess.run(
-                [self.ollama_path, 'run', self.ollama_model, prompt],
+                [self.ollama_path, "run", self.ollama_model, prompt],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
             )
 
             if result.returncode == 0:
                 response = result.stdout.strip().upper()
 
-                if 'TOC' in response or 'TABLE OF CONTENTS' in response:
-                    return True, 'toc'
-                elif 'COPYRIGHT' in response:
-                    return True, 'copyright'
-                elif 'SUBSTANTIVE' in response:
-                    return False, 'substantive'
+                if "TOC" in response or "TABLE OF CONTENTS" in response:
+                    return True, "toc"
+                elif "COPYRIGHT" in response:
+                    return True, "copyright"
+                elif "SUBSTANTIVE" in response:
+                    return False, "substantive"
 
-            return False, 'unknown'
+            return False, "unknown"
 
         except (subprocess.TimeoutExpired, Exception) as e:
             self.logger.debug(f"LLM boilerplate check failed: {e}")
-            return False, 'unknown'
+            return False, "unknown"
 
     def _check_chapter_relevance_llm(self, text: str) -> Tuple[bool, float]:
         """
@@ -449,18 +475,18 @@ Format: YES 0.9 or NO 0.3"""
 
         try:
             result = subprocess.run(
-                [self.ollama_path, 'run', self.ollama_model, prompt],
+                [self.ollama_path, "run", self.ollama_model, prompt],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
             )
 
             if result.returncode == 0:
                 response = result.stdout.strip().upper()
 
-                match = re.search(r'(YES|NO)\s+(0?\.\d+|1\.0|[01])', response)
+                match = re.search(r"(YES|NO)\s+(0?\.\d+|1\.0|[01])", response)
                 if match:
-                    is_relevant = match.group(1) == 'YES'
+                    is_relevant = match.group(1) == "YES"
                     confidence = float(match.group(2))
                     return is_relevant, confidence
 
@@ -470,7 +496,9 @@ Format: YES 0.9 or NO 0.3"""
             self.logger.debug(f"LLM check failed: {e}")
             return True, 0.5
 
-    def _extract_epub_metadata(self, book: epub.EpubBook, ebook_path: str) -> Dict[str, str]:
+    def _extract_epub_metadata(
+        self, book: epub.EpubBook, ebook_path: str
+    ) -> Dict[str, str]:
         """
         Extract metadata from EPUB document.
 
@@ -484,47 +512,47 @@ Format: YES 0.9 or NO 0.3"""
         metadata = {}
 
         # Extract title
-        title = book.get_metadata('DC', 'title')
+        title = book.get_metadata("DC", "title")
         if title and len(title) > 0:
-            metadata['title'] = title[0][0]
+            metadata["title"] = title[0][0]
         else:
-            metadata['title'] = Path(ebook_path).stem
+            metadata["title"] = Path(ebook_path).stem
 
         # Extract author
-        creator = book.get_metadata('DC', 'creator')
+        creator = book.get_metadata("DC", "creator")
         if creator and len(creator) > 0:
-            metadata['author'] = creator[0][0]
+            metadata["author"] = creator[0][0]
         else:
-            metadata['author'] = "unknown"
+            metadata["author"] = "unknown"
 
         # Extract date
-        date = book.get_metadata('DC', 'date')
+        date = book.get_metadata("DC", "date")
         if date and len(date) > 0:
             date_str = date[0][0]
             # Try to parse and format date
             try:
                 if len(date_str) >= 10:
-                    metadata['publish_date'] = date_str[:10]
+                    metadata["publish_date"] = date_str[:10]
                 else:
-                    metadata['publish_date'] = date_str
+                    metadata["publish_date"] = date_str
             except Exception:
-                metadata['publish_date'] = "unknown"
+                metadata["publish_date"] = "unknown"
         else:
-            metadata['publish_date'] = "unknown"
+            metadata["publish_date"] = "unknown"
 
         # Extract subject/keywords
-        subjects = book.get_metadata('DC', 'subject')
+        subjects = book.get_metadata("DC", "subject")
         if subjects and len(subjects) > 0:
-            metadata['keywords'] = [s[0] for s in subjects]
+            metadata["keywords"] = [s[0] for s in subjects]
         else:
-            metadata['keywords'] = ["unknown"]
+            metadata["keywords"] = ["unknown"]
 
         # Extract language
-        language = book.get_metadata('DC', 'language')
+        language = book.get_metadata("DC", "language")
         if language and len(language) > 0:
-            metadata['language'] = language[0][0]
+            metadata["language"] = language[0][0]
         else:
-            metadata['language'] = "unknown"
+            metadata["language"] = "unknown"
 
         return metadata
 
@@ -539,11 +567,11 @@ Format: YES 0.9 or NO 0.3"""
             Dictionary containing metadata fields
         """
         metadata = {
-            'title': Path(ebook_path).stem,
-            'author': "unknown",
-            'publish_date': "unknown",
-            'keywords': ["unknown"],
-            'language': "unknown"
+            "title": Path(ebook_path).stem,
+            "author": "unknown",
+            "publish_date": "unknown",
+            "keywords": ["unknown"],
+            "language": "unknown",
         }
 
         try:
@@ -552,36 +580,53 @@ Format: YES 0.9 or NO 0.3"""
             # Try to read OPF file for metadata
             opf_files = list(Path(tempdir).rglob("*.opf"))
             if opf_files:
-                with open(opf_files[0], 'r', encoding='utf-8', errors='ignore') as f:
+                with open(opf_files[0], "r", encoding="utf-8", errors="ignore") as f:
                     opf_content = f.read()
 
                     # Extract title
-                    title_match = re.search(r'<dc:title[^>]*>([^<]+)</dc:title>', opf_content, re.IGNORECASE)
+                    title_match = re.search(
+                        r"<dc:title[^>]*>([^<]+)</dc:title>", opf_content, re.IGNORECASE
+                    )
                     if title_match:
-                        metadata['title'] = title_match.group(1).strip()
+                        metadata["title"] = title_match.group(1).strip()
 
                     # Extract author
-                    author_match = re.search(r'<dc:creator[^>]*>([^<]+)</dc:creator>', opf_content, re.IGNORECASE)
+                    author_match = re.search(
+                        r"<dc:creator[^>]*>([^<]+)</dc:creator>",
+                        opf_content,
+                        re.IGNORECASE,
+                    )
                     if author_match:
-                        metadata['author'] = author_match.group(1).strip()
+                        metadata["author"] = author_match.group(1).strip()
 
                     # Extract date
-                    date_match = re.search(r'<dc:date[^>]*>([^<]+)</dc:date>', opf_content, re.IGNORECASE)
+                    date_match = re.search(
+                        r"<dc:date[^>]*>([^<]+)</dc:date>", opf_content, re.IGNORECASE
+                    )
                     if date_match:
-                        metadata['publish_date'] = date_match.group(1).strip()[:10]
+                        metadata["publish_date"] = date_match.group(1).strip()[:10]
 
                     # Extract subject
-                    subjects = re.findall(r'<dc:subject[^>]*>([^<]+)</dc:subject>', opf_content, re.IGNORECASE)
+                    subjects = re.findall(
+                        r"<dc:subject[^>]*>([^<]+)</dc:subject>",
+                        opf_content,
+                        re.IGNORECASE,
+                    )
                     if subjects:
-                        metadata['keywords'] = [s.strip() for s in subjects]
+                        metadata["keywords"] = [s.strip() for s in subjects]
 
                     # Extract language
-                    lang_match = re.search(r'<dc:language[^>]*>([^<]+)</dc:language>', opf_content, re.IGNORECASE)
+                    lang_match = re.search(
+                        r"<dc:language[^>]*>([^<]+)</dc:language>",
+                        opf_content,
+                        re.IGNORECASE,
+                    )
                     if lang_match:
-                        metadata['language'] = lang_match.group(1).strip()
+                        metadata["language"] = lang_match.group(1).strip()
 
             # Clean up temp directory
             import shutil
+
             shutil.rmtree(tempdir, ignore_errors=True)
 
         except Exception as e:
@@ -635,17 +680,17 @@ Format: YES 0.9 or NO 0.3"""
             metadata = self._extract_epub_metadata(book, epub_path)
 
             markdown_parts.append("---\n")
-            markdown_parts.append(f"title: \"{metadata['title']}\"\n")
-            markdown_parts.append(f"author: \"{metadata['author']}\"\n")
-            markdown_parts.append(f"publish_date: \"{metadata['publish_date']}\"\n")
-            markdown_parts.append(f"language: \"{metadata['language']}\"\n")
+            markdown_parts.append(f'title: "{metadata["title"]}"\n')
+            markdown_parts.append(f'author: "{metadata["author"]}"\n')
+            markdown_parts.append(f'publish_date: "{metadata["publish_date"]}"\n')
+            markdown_parts.append(f'language: "{metadata["language"]}"\n')
 
-            if len(metadata['keywords']) == 1:
-                markdown_parts.append(f"keywords: [\"{metadata['keywords'][0]}\"]\n")
+            if len(metadata["keywords"]) == 1:
+                markdown_parts.append(f'keywords: ["{metadata["keywords"][0]}"]\n')
             else:
                 markdown_parts.append("keywords:\n")
-                for keyword in metadata['keywords']:
-                    markdown_parts.append(f"  - \"{keyword}\"\n")
+                for keyword in metadata["keywords"]:
+                    markdown_parts.append(f'  - "{keyword}"\n')
 
             markdown_parts.append("---\n\n")
             markdown_parts.append(f"# {metadata['title']}\n\n")
@@ -659,7 +704,7 @@ Format: YES 0.9 or NO 0.3"""
         for item in book.get_items():
             if item.get_type() == ebooklib.ITEM_DOCUMENT:
                 try:
-                    html_content = item.get_content().decode('utf-8', errors='ignore')
+                    html_content = item.get_content().decode("utf-8", errors="ignore")
                     text = strip_html(html_content)
                     if text.strip():
                         chapters_text.append(text)
@@ -687,7 +732,9 @@ Format: YES 0.9 or NO 0.3"""
                 is_boilerplate, content_type = self._is_boilerplate_content_llm(text)
                 if is_boilerplate:
                     skipped_boilerplate += 1
-                    self.logger.debug(f"Chapter {chapter_num + 1}: Skipped (detected as {content_type})")
+                    self.logger.debug(
+                        f"Chapter {chapter_num + 1}: Skipped (detected as {content_type})"
+                    )
                     continue
 
             if not self._is_chapter_substantial(text):
@@ -717,13 +764,13 @@ Format: YES 0.9 or NO 0.3"""
         )
 
         if substantial_chapters:
-            content = '\n\n'.join(substantial_chapters)
+            content = "\n\n".join(substantial_chapters)
             content = self._normalize_text(content)
             markdown_parts.append(content)
         else:
             markdown_parts.append("_No substantial content found in document._\n")
 
-        return ''.join(markdown_parts)
+        return "".join(markdown_parts)
 
     def mobi_to_markdown(self, mobi_path: str) -> str:
         """
@@ -748,17 +795,17 @@ Format: YES 0.9 or NO 0.3"""
                 metadata = self._extract_mobi_metadata(mobi_path)
 
                 markdown_parts.append("---\n")
-                markdown_parts.append(f"title: \"{metadata['title']}\"\n")
-                markdown_parts.append(f"author: \"{metadata['author']}\"\n")
-                markdown_parts.append(f"publish_date: \"{metadata['publish_date']}\"\n")
-                markdown_parts.append(f"language: \"{metadata['language']}\"\n")
+                markdown_parts.append(f'title: "{metadata["title"]}"\n')
+                markdown_parts.append(f'author: "{metadata["author"]}"\n')
+                markdown_parts.append(f'publish_date: "{metadata["publish_date"]}"\n')
+                markdown_parts.append(f'language: "{metadata["language"]}"\n')
 
-                if len(metadata['keywords']) == 1:
-                    markdown_parts.append(f"keywords: [\"{metadata['keywords'][0]}\"]\n")
+                if len(metadata["keywords"]) == 1:
+                    markdown_parts.append(f'keywords: ["{metadata["keywords"][0]}"]\n')
                 else:
                     markdown_parts.append("keywords:\n")
-                    for keyword in metadata['keywords']:
-                        markdown_parts.append(f"  - \"{keyword}\"\n")
+                    for keyword in metadata["keywords"]:
+                        markdown_parts.append(f'  - "{keyword}"\n')
 
                 markdown_parts.append("---\n\n")
                 markdown_parts.append(f"# {metadata['title']}\n\n")
@@ -771,12 +818,14 @@ Format: YES 0.9 or NO 0.3"""
             chapters_text = []
 
             # Look for HTML files
-            html_files = list(Path(tempdir).rglob("*.html")) + list(Path(tempdir).rglob("*.htm"))
+            html_files = list(Path(tempdir).rglob("*.html")) + list(
+                Path(tempdir).rglob("*.htm")
+            )
             html_files.sort()  # Sort to maintain order
 
             for html_file in html_files:
                 try:
-                    with open(html_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(html_file, "r", encoding="utf-8", errors="ignore") as f:
                         html_content = f.read()
                     text = strip_html(html_content)
                     if text.strip():
@@ -787,10 +836,10 @@ Format: YES 0.9 or NO 0.3"""
             # If no HTML files, try the main extracted file
             if not chapters_text and filepath:
                 try:
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()
                     # Check if it's HTML
-                    if '<html' in content.lower() or '<body' in content.lower():
+                    if "<html" in content.lower() or "<body" in content.lower():
                         text = strip_html(content)
                     else:
                         text = content
@@ -816,10 +865,14 @@ Format: YES 0.9 or NO 0.3"""
                 text = self._normalize_text(text)
 
                 if self.ollama_available:
-                    is_boilerplate, content_type = self._is_boilerplate_content_llm(text)
+                    is_boilerplate, content_type = self._is_boilerplate_content_llm(
+                        text
+                    )
                     if is_boilerplate:
                         skipped_boilerplate += 1
-                        self.logger.debug(f"Chapter {chapter_num + 1}: Skipped (detected as {content_type})")
+                        self.logger.debug(
+                            f"Chapter {chapter_num + 1}: Skipped (detected as {content_type})"
+                        )
                         continue
 
                 if not self._is_chapter_substantial(text):
@@ -849,7 +902,7 @@ Format: YES 0.9 or NO 0.3"""
             )
 
             if substantial_chapters:
-                content = '\n\n'.join(substantial_chapters)
+                content = "\n\n".join(substantial_chapters)
                 content = self._normalize_text(content)
                 markdown_parts.append(content)
             else:
@@ -859,7 +912,7 @@ Format: YES 0.9 or NO 0.3"""
             # Clean up temp directory
             shutil.rmtree(tempdir, ignore_errors=True)
 
-        return ''.join(markdown_parts)
+        return "".join(markdown_parts)
 
     def process_ebook(self, ebook_path: str) -> bool:
         """
@@ -877,12 +930,12 @@ Format: YES 0.9 or NO 0.3"""
             # Determine file type and convert
             ext = Path(ebook_path).suffix.lower()
 
-            if ext == '.epub':
+            if ext == ".epub":
                 if not EPUB_AVAILABLE:
                     self.logger.error(f"EPUB support not available: {ebook_path}")
                     return False
                 markdown_content = self.epub_to_markdown(ebook_path)
-            elif ext == '.mobi':
+            elif ext == ".mobi":
                 if not MOBI_AVAILABLE:
                     self.logger.error(f"MOBI support not available: {ebook_path}")
                     return False
@@ -900,14 +953,12 @@ Format: YES 0.9 or NO 0.3"""
             output_path = os.path.join(self.output_dir, f"{ebook_filename}.md")
 
             # Write markdown file
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 f.write(markdown_content)
 
             # Mark as processed
             self.file_tracker.mark_processed(
-                ebook_path,
-                chunk_count=0,
-                status='success'
+                ebook_path, chunk_count=0, status="success"
             )
 
             self.logger.info(
@@ -917,15 +968,10 @@ Format: YES 0.9 or NO 0.3"""
             return True
 
         except Exception as e:
-            self.logger.error(
-                f"Error processing {ebook_path}: {e}",
-                exc_info=True
-            )
+            self.logger.error(f"Error processing {ebook_path}: {e}", exc_info=True)
             try:
                 self.file_tracker.mark_processed(
-                    ebook_path,
-                    chunk_count=0,
-                    status='error'
+                    ebook_path, chunk_count=0, status="error"
                 )
             except Exception:
                 pass
@@ -940,14 +986,14 @@ Format: YES 0.9 or NO 0.3"""
             Dictionary with scan statistics
         """
         stats = {
-            'files_found': 0,
-            'files_processed': 0,
-            'files_skipped': 0,
-            'files_failed': 0
+            "files_found": 0,
+            "files_processed": 0,
+            "files_skipped": 0,
+            "files_failed": 0,
         }
 
         ebook_files = self.find_ebook_files()
-        stats['files_found'] = len(ebook_files)
+        stats["files_found"] = len(ebook_files)
 
         if not ebook_files:
             self.logger.debug(f"No ebook files found in {self.input_dir}")
@@ -956,11 +1002,11 @@ Format: YES 0.9 or NO 0.3"""
         for file_path in ebook_files:
             if self.should_process_file(file_path):
                 if self.process_ebook(file_path):
-                    stats['files_processed'] += 1
+                    stats["files_processed"] += 1
                 else:
-                    stats['files_failed'] += 1
+                    stats["files_failed"] += 1
             else:
-                stats['files_skipped'] += 1
+                stats["files_skipped"] += 1
                 self.logger.debug(f"Skipping (already processed): {file_path}")
 
         return stats
@@ -984,7 +1030,7 @@ Format: YES 0.9 or NO 0.3"""
 
                 stats = self.run_single_scan()
 
-                if stats['files_processed'] > 0 or stats['files_failed'] > 0:
+                if stats["files_processed"] > 0 or stats["files_failed"] > 0:
                     self.logger.info(
                         f"Scan #{scan_count} complete: "
                         f"{stats['files_processed']} processed, "
@@ -1006,19 +1052,19 @@ Format: YES 0.9 or NO 0.3"""
     def _shutdown(self):
         """Cleanup and shutdown."""
         stats = self.file_tracker.get_statistics()
-        self.logger.info("\n" + "="*60)
+        self.logger.info("\n" + "=" * 60)
         self.logger.info("Final Statistics:")
         self.logger.info(f"  Total ebooks processed: {stats['total_files']}")
         self.logger.info(f"  Successful: {stats['successful']}")
         self.logger.info(f"  Errors: {stats['errors']}")
-        self.logger.info("="*60)
+        self.logger.info("=" * 60)
         self.logger.info("Ebook Tracker stopped")
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description='Ebook (EPUB/MOBI) monitoring and conversion to markdown',
+        description="Ebook (EPUB/MOBI) monitoring and conversion to markdown",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1036,36 +1082,36 @@ Examples:
 
 Note: When --force-reprocess is provided, the script runs once and exits.
       Without it, the script runs in continuous monitoring mode.
-        """
+        """,
     )
 
     parser.add_argument(
-        '--force-reprocess',
+        "--force-reprocess",
         type=str,
-        metavar='PATTERN',
-        help='Regex pattern to match ebook filenames for forced reprocessing. '
-             'Runs in one-shot mode (single scan then exit) instead of continuous monitoring. '
-             'Example patterns: "^book" or "2024" or "filename\\.epub$"'
+        metavar="PATTERN",
+        help="Regex pattern to match ebook filenames for forced reprocessing. "
+        "Runs in one-shot mode (single scan then exit) instead of continuous monitoring. "
+        'Example patterns: "^book" or "2024" or "filename\\.epub$"',
     )
 
     parser.add_argument(
-        '--input-dir',
+        "--input-dir",
         type=str,
         default="~/Documents/AI_IN",
-        help='Directory to monitor for ebooks (default: ~/Documents/AI_IN)'
+        help="Directory to monitor for ebooks (default: ~/Documents/AI_IN)",
     )
 
     parser.add_argument(
-        '--no-metadata',
-        action='store_true',
-        help='Disable YAML frontmatter metadata in output'
+        "--no-metadata",
+        action="store_true",
+        help="Disable YAML frontmatter metadata in output",
     )
 
     parser.add_argument(
-        '--poll-interval',
+        "--poll-interval",
         type=int,
         default=5,
-        help='Seconds between directory scans (default: 5)'
+        help="Seconds between directory scans (default: 5)",
     )
 
     args = parser.parse_args()
@@ -1088,23 +1134,25 @@ Note: When --force-reprocess is provided, the script runs once and exits.
             ollama_model="llama3.2:1b",
             ollama_threshold=0.5,
             include_metadata=not args.no_metadata,
-            force_reprocess_pattern=args.force_reprocess
+            force_reprocess_pattern=args.force_reprocess,
         )
 
         if args.force_reprocess:
             tracker.logger.info("Running in one-shot mode (force reprocess enabled)")
             stats = tracker.run_single_scan()
 
-            tracker.logger.info("="*60)
+            tracker.logger.info("=" * 60)
             tracker.logger.info("Single scan complete:")
             tracker.logger.info(f"  Files found: {stats['files_found']}")
             tracker.logger.info(f"  Files processed: {stats['files_processed']}")
             tracker.logger.info(f"  Files failed: {stats['files_failed']}")
             tracker.logger.info(f"  Files skipped: {stats['files_skipped']}")
-            tracker.logger.info("="*60)
+            tracker.logger.info("=" * 60)
 
             tracker_stats = tracker.file_tracker.get_statistics()
-            tracker.logger.info(f"Total ebooks in database: {tracker_stats['total_files']}")
+            tracker.logger.info(
+                f"Total ebooks in database: {tracker_stats['total_files']}"
+            )
 
             sys.exit(0)
         else:
@@ -1112,6 +1160,7 @@ Note: When --force-reprocess is provided, the script runs once and exits.
 
     except Exception as e:
         import logging
+
         logging.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
 

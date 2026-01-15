@@ -11,12 +11,11 @@ import sys
 import logging
 import argparse
 import sqlite3
-from pathlib import Path
 import chromadb
 from chromadb.config import Settings
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 
 
@@ -25,8 +24,8 @@ def setup_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
     return logging.getLogger(__name__)
 
@@ -55,7 +54,9 @@ def clear_tracking_db(db_path: str, db_type: str, logger: logging.Logger) -> int
             count = cursor.fetchone()[0]
 
             if count == 0:
-                logger.info(f"{db_type.capitalize()} tracking database is already empty")
+                logger.info(
+                    f"{db_type.capitalize()} tracking database is already empty"
+                )
                 return 0
 
             # Delete all records
@@ -69,7 +70,9 @@ def clear_tracking_db(db_path: str, db_type: str, logger: logging.Logger) -> int
         return 0
 
 
-def clear_chromadb(host: str, port: int, collection_name: str, logger: logging.Logger) -> int:
+def clear_chromadb(
+    host: str, port: int, collection_name: str, logger: logging.Logger
+) -> int:
     """
     Clear all documents from ChromaDB collection.
 
@@ -86,9 +89,7 @@ def clear_chromadb(host: str, port: int, collection_name: str, logger: logging.L
         # Connect to ChromaDB
         logger.info(f"Connecting to ChromaDB at {host}:{port}...")
         client = chromadb.HttpClient(
-            host=host,
-            port=port,
-            settings=Settings(anonymized_telemetry=False)
+            host=host, port=port, settings=Settings(anonymized_telemetry=False)
         )
 
         # Get collection
@@ -106,16 +107,20 @@ def clear_chromadb(host: str, port: int, collection_name: str, logger: logging.L
             return 0
 
         # Delete the collection entirely and recreate it
-        logger.info(f"Deleting collection '{collection_name}' with {count} documents...")
+        logger.info(
+            f"Deleting collection '{collection_name}' with {count} documents..."
+        )
         client.delete_collection(name=collection_name)
 
         # Recreate the collection
         client.create_collection(
             name=collection_name,
-            metadata={"description": "Document embeddings for semantic search"}
+            metadata={"description": "Document embeddings for semantic search"},
         )
 
-        logger.info(f"✓ Cleared {count} documents from ChromaDB collection '{collection_name}'")
+        logger.info(
+            f"✓ Cleared {count} documents from ChromaDB collection '{collection_name}'"
+        )
         return count
 
     except Exception as e:
@@ -127,7 +132,7 @@ def clear_chromadb(host: str, port: int, collection_name: str, logger: logging.L
 def main():
     """Main function to clear databases with explicit, selective options."""
     parser = argparse.ArgumentParser(
-        description='Clear file tracking databases and/or ChromaDB collection',
+        description="Clear file tracking databases and/or ChromaDB collection",
         epilog="""
 Examples:
   %(prog)s --tracker --md              Clear only markdown tracking
@@ -138,43 +143,35 @@ Examples:
   %(prog)s --tracker --chroma          Clear everything
   %(prog)s --tracker --md --chroma -y  Clear markdown tracking and ChromaDB (no confirmation)
         """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     # Primary action flags
     parser.add_argument(
-        '--tracker',
-        action='store_true',
-        help='Clear file tracking database(s)'
+        "--tracker", action="store_true", help="Clear file tracking database(s)"
     )
     parser.add_argument(
-        '--chroma',
-        action='store_true',
-        help='Clear ChromaDB collection'
+        "--chroma", action="store_true", help="Clear ChromaDB collection"
     )
 
     # Selective tracker clearing
     parser.add_argument(
-        '--md',
-        action='store_true',
-        help='Clear only markdown tracking database (use with --tracker)'
+        "--md",
+        action="store_true",
+        help="Clear only markdown tracking database (use with --tracker)",
     )
     parser.add_argument(
-        '--pdf',
-        action='store_true',
-        help='Clear only PDF tracking database (use with --tracker)'
+        "--pdf",
+        action="store_true",
+        help="Clear only PDF tracking database (use with --tracker)",
     )
 
     # Options
     parser.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging'
+        "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     parser.add_argument(
-        '-y', '--yes',
-        action='store_true',
-        help='Skip confirmation prompt'
+        "-y", "--yes", action="store_true", help="Skip confirmation prompt"
     )
 
     args = parser.parse_args()
@@ -192,12 +189,14 @@ Examples:
     # Initialize config
     config = Config()
 
-    # Get configuration
-    md_tracking_db = config.get('TRACKING_DB', './data/tracking.db')
-    pdf_tracking_db = './data/pdf_tracking.db'
-    chromadb_host = config.get('CHROMADB_HOST', 'localhost')
-    chromadb_port = config.get_int('CHROMADB_PORT', 8000)
-    collection_name = config.get('CHROMADB_COLLECTION', 'documents')
+    # Get configuration - all paths resolved via config
+    md_tracking_db = config.get_path("TRACKING_DB", "./hippocampus/data/tracking.db")
+    pdf_tracking_db = config.get_path(
+        "PDF_TRACKING_DB", "./hippocampus/data/pdf_tracking.db"
+    )
+    chromadb_host = config.get("CHROMADB_HOST", "localhost")
+    chromadb_port = config.get_int("CHROMADB_PORT", 8000)
+    collection_name = config.get("CHROMADB_COLLECTION", "documents")
 
     # Determine what to clear
     clear_md = False
@@ -225,7 +224,9 @@ Examples:
     if clear_pdf:
         items_to_clear.append(f"PDF tracking: {pdf_tracking_db}")
     if clear_chroma_flag:
-        items_to_clear.append(f"ChromaDB: {chromadb_host}:{chromadb_port}/{collection_name}")
+        items_to_clear.append(
+            f"ChromaDB: {chromadb_host}:{chromadb_port}/{collection_name}"
+        )
 
     logger.info("Will clear:")
     for item in items_to_clear:
@@ -235,8 +236,10 @@ Examples:
 
     # Confirmation prompt
     if not args.yes:
-        response = input("\nThis will permanently delete all specified data. Continue? [y/N]: ")
-        if response.lower() not in ['y', 'yes']:
+        response = input(
+            "\nThis will permanently delete all specified data. Continue? [y/N]: "
+        )
+        if response.lower() not in ["y", "yes"]:
             logger.info("Aborted by user")
             return 0
 
@@ -250,23 +253,20 @@ Examples:
     # Clear markdown tracking database
     if clear_md:
         logger.info("Clearing markdown tracking database...")
-        total_md_records = clear_tracking_db(md_tracking_db, 'markdown', logger)
+        total_md_records = clear_tracking_db(md_tracking_db, "markdown", logger)
         logger.info("")
 
     # Clear PDF tracking database
     if clear_pdf:
         logger.info("Clearing PDF tracking database...")
-        total_pdf_records = clear_tracking_db(pdf_tracking_db, 'pdf', logger)
+        total_pdf_records = clear_tracking_db(pdf_tracking_db, "pdf", logger)
         logger.info("")
 
     # Clear ChromaDB
     if clear_chroma_flag:
         logger.info("Clearing ChromaDB collection...")
         total_chroma_docs = clear_chromadb(
-            chromadb_host,
-            chromadb_port,
-            collection_name,
-            logger
+            chromadb_host, chromadb_port, collection_name, logger
         )
         logger.info("")
 

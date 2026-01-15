@@ -14,7 +14,7 @@ from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 # Add parent directory to path for libs import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 
 # Initialize config
@@ -24,11 +24,11 @@ config = Config()
 class QueryREPL:
     def __init__(self):
         # Load configuration
-        chromadb_host = config.get('CHROMADB_HOST', 'localhost')
-        chromadb_port = config.get_int('CHROMADB_PORT', 8000)
-        collection_name = config.get('CHROMADB_COLLECTION', 'documents')
-        embedding_model_name = config.get('EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
-        self.default_n_results = config.get_int('DEFAULT_RESULTS', 5)
+        chromadb_host = config.get("CHROMADB_HOST", "localhost")
+        chromadb_port = config.get_int("CHROMADB_PORT", 8000)
+        collection_name = config.get("CHROMADB_COLLECTION", "documents")
+        embedding_model_name = config.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+        self.default_n_results = config.get_int("DEFAULT_RESULTS", 5)
 
         print(f"Connecting to ChromaDB at {chromadb_host}:{chromadb_port}...")
 
@@ -36,7 +36,7 @@ class QueryREPL:
         self.client = chromadb.HttpClient(
             host=chromadb_host,
             port=chromadb_port,
-            settings=Settings(anonymized_telemetry=False)
+            settings=Settings(anonymized_telemetry=False),
         )
 
         # Get collection
@@ -45,7 +45,9 @@ class QueryREPL:
         print(f"Collection '{collection_name}' has {self.total_docs} documents")
 
         if self.total_docs == 0:
-            print("Warning: No documents in collection. Run ingest.py first to add documents.")
+            print(
+                "Warning: No documents in collection. Run ingest.py first to add documents."
+            )
 
         # Load embedding model
         print(f"Loading embedding model: {embedding_model_name}...")
@@ -74,25 +76,25 @@ class QueryREPL:
         pattern = re.escape(query_text)
 
         for doc, metadata, doc_id in zip(
-            self.all_docs['documents'],
-            self.all_docs['metadatas'],
-            self.all_docs['ids']
+            self.all_docs["documents"], self.all_docs["metadatas"], self.all_docs["ids"]
         ):
             # Case-insensitive search
             if re.search(pattern, doc, re.IGNORECASE):
                 match_count = len(re.findall(pattern, doc, re.IGNORECASE))
-                matches.append({
-                    'doc': doc,
-                    'metadata': metadata,
-                    'id': doc_id,
-                    'match_count': match_count,
-                    'match_type': 'exact'
-                })
+                matches.append(
+                    {
+                        "doc": doc,
+                        "metadata": metadata,
+                        "id": doc_id,
+                        "match_count": match_count,
+                        "match_type": "exact",
+                    }
+                )
 
         # Sort by match count
-        matches.sort(key=lambda x: x['match_count'], reverse=True)
+        matches.sort(key=lambda x: x["match_count"], reverse=True)
 
-        return matches[:n_results * 2]  # Get extra for deduplication
+        return matches[: n_results * 2]  # Get extra for deduplication
 
     def embedding_search(self, query_text: str, n_results: int = None):
         """
@@ -114,23 +116,27 @@ class QueryREPL:
         # Query ChromaDB
         results = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
-            n_results=min(n_results * 3, self.total_docs)  # Get extra for deduplication
+            n_results=min(
+                n_results * 3, self.total_docs
+            ),  # Get extra for deduplication
         )
 
         matches = []
         for doc, metadata, distance, doc_id in zip(
-            results['documents'][0],
-            results['metadatas'][0],
-            results['distances'][0],
-            results['ids'][0]
+            results["documents"][0],
+            results["metadatas"][0],
+            results["distances"][0],
+            results["ids"][0],
         ):
-            matches.append({
-                'doc': doc,
-                'metadata': metadata,
-                'id': doc_id,
-                'distance': distance,
-                'match_type': 'semantic'
-            })
+            matches.append(
+                {
+                    "doc": doc,
+                    "metadata": metadata,
+                    "id": doc_id,
+                    "distance": distance,
+                    "match_type": "semantic",
+                }
+            )
 
         return matches
 
@@ -160,23 +166,23 @@ class QueryREPL:
 
         # Priority 1: Direct matches (exact text found)
         for match in direct_matches:
-            if match['id'] not in seen_ids:
-                seen_ids.add(match['id'])
+            if match["id"] not in seen_ids:
+                seen_ids.add(match["id"])
                 combined_results.append(match)
 
         # Priority 2: Embedding matches (semantic similarity)
         for match in embedding_matches:
-            if match['id'] not in seen_ids:
-                seen_ids.add(match['id'])
+            if match["id"] not in seen_ids:
+                seen_ids.add(match["id"])
                 combined_results.append(match)
 
         # Limit to requested number of results
         combined_results = combined_results[:n_results]
 
         # Display results
-        print("\n" + "="*80)
-        print(f"HYBRID SEARCH RESULTS")
-        print("="*80)
+        print("\n" + "=" * 80)
+        print("HYBRID SEARCH RESULTS")
+        print("=" * 80)
         print(f"Query: '{query_text}'")
 
         if direct_matches:
@@ -184,16 +190,18 @@ class QueryREPL:
         else:
             print("✗ No exact matches found")
 
-        print(f"Found {len(combined_results)} total results (showing top {min(n_results, len(combined_results))})")
-        print("="*80)
+        print(
+            f"Found {len(combined_results)} total results (showing top {min(n_results, len(combined_results))})"
+        )
+        print("=" * 80)
 
         for idx, result in enumerate(combined_results, start=1):
-            doc = result['doc']
-            metadata = result['metadata']
-            match_type = result['match_type']
+            doc = result["doc"]
+            metadata = result["metadata"]
+            match_type = result["match_type"]
 
             # Result header with type indicator
-            if match_type == 'exact':
+            if match_type == "exact":
                 type_badge = f"[EXACT MATCH - {result['match_count']} occurrences]"
             else:
                 type_badge = f"[SEMANTIC - distance: {result['distance']:.4f}]"
@@ -204,18 +212,20 @@ class QueryREPL:
             # Show header hierarchy if available
             headers = []
             for i in range(1, 7):
-                header_key = f'h{i}'
+                header_key = f"h{i}"
                 if header_key in metadata:
-                    headers.append(f"{'#'*i} {metadata[header_key]}")
+                    headers.append(f"{'#' * i} {metadata[header_key]}")
 
             if headers:
                 print(f"Location: {' > '.join(headers)}")
 
-            print(f"Chunk {metadata.get('chunk_index', '?')} ({metadata.get('char_count', '?')} chars)")
-            print("-"*80)
+            print(
+                f"Chunk {metadata.get('chunk_index', '?')} ({metadata.get('char_count', '?')} chars)"
+            )
+            print("-" * 80)
 
             # For exact matches, show context around the match
-            if match_type == 'exact':
+            if match_type == "exact":
                 pattern = re.escape(query_text)
                 match_obj = re.search(pattern, doc, re.IGNORECASE)
                 if match_obj:
@@ -226,10 +236,7 @@ class QueryREPL:
 
                     # Highlight the match (simple approach)
                     highlighted = re.sub(
-                        f'({pattern})',
-                        r'>>> \1 <<<',
-                        context,
-                        flags=re.IGNORECASE
+                        f"({pattern})", r">>> \1 <<<", context, flags=re.IGNORECASE
                     )
                     if start > 0:
                         highlighted = "..." + highlighted
@@ -245,25 +252,25 @@ class QueryREPL:
                 print(preview)
             print()
 
-        print("="*80 + "\n")
+        print("=" * 80 + "\n")
 
     def start_repl(self):
         """Start the REPL interface"""
         # Set up readline history
-        history_file = os.path.expanduser('~/.query_history')
+        history_file = os.path.expanduser("~/.query_history")
         try:
             readline.read_history_file(history_file)
         except FileNotFoundError:
             pass
 
-        print("="*60)
+        print("=" * 60)
         print("ChromaDB Hybrid Query REPL")
-        print("="*60)
+        print("=" * 60)
         print("Type your search query and press Enter")
         print("Hybrid search: Combines exact text matching + semantic search")
         print("Commands: 'quit' or 'exit' to exit, Ctrl+C to interrupt")
         print("Append ':N' to limit results (e.g., 'machine learning:3')")
-        print("="*60 + "\n")
+        print("=" * 60 + "\n")
 
         try:
             while True:
@@ -273,14 +280,14 @@ class QueryREPL:
                     if not text:
                         continue
 
-                    if text.lower() in ['quit', 'exit']:
+                    if text.lower() in ["quit", "exit"]:
                         print("Exiting...")
                         break
 
                     # Check if user specified a result count
                     n_results = self.default_n_results
-                    if ':' in text:
-                        parts = text.rsplit(':', 1)
+                    if ":" in text:
+                        parts = text.rsplit(":", 1)
                         try:
                             n_results = int(parts[1])
                             text = parts[0].strip()

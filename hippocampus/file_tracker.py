@@ -8,7 +8,6 @@ import sqlite3
 import hashlib
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, List, Dict
 import logging
 from clean_md import clean_markdown
@@ -54,11 +53,15 @@ class FileTracker:
             # Migration: Add retries column if it doesn't exist
             cursor = conn.execute("PRAGMA table_info(processed_files)")
             columns = [row[1] for row in cursor.fetchall()]
-            if 'retries' not in columns:
-                conn.execute("ALTER TABLE processed_files ADD COLUMN retries INTEGER DEFAULT 0")
+            if "retries" not in columns:
+                conn.execute(
+                    "ALTER TABLE processed_files ADD COLUMN retries INTEGER DEFAULT 0"
+                )
                 logger.info("Added 'retries' column to processed_files table")
-            if 'error_message' not in columns:
-                conn.execute("ALTER TABLE processed_files ADD COLUMN error_message TEXT")
+            if "error_message" not in columns:
+                conn.execute(
+                    "ALTER TABLE processed_files ADD COLUMN error_message TEXT"
+                )
                 logger.info("Added 'error_message' column to processed_files table")
 
             conn.execute("""
@@ -97,7 +100,7 @@ class FileTracker:
         file_path: str,
         model: str = "llama3.2",
         chunk_size: int = 4000,
-        repetition_threshold: int = 3
+        repetition_threshold: int = 3,
     ) -> bool:
         """
         Preprocess a file before tracking. For markdown files, this calls
@@ -113,7 +116,7 @@ class FileTracker:
             True if file was preprocessed (modified), False if skipped
         """
         # Check if file is a markdown file
-        if not file_path.lower().endswith('.md'):
+        if not file_path.lower().endswith(".md"):
             logger.debug(f"Skipping non-markdown file: {file_path}")
             return False
 
@@ -133,11 +136,11 @@ class FileTracker:
                 file_path,
                 model=model,
                 chunk_size=chunk_size,
-                repetition_threshold=repetition_threshold
+                repetition_threshold=repetition_threshold,
             )
 
             # Write cleaned content back to file
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with open(file_path, "w", encoding="utf-8") as f:
                 f.write(cleaned_content)
 
             # Calculate hash after cleaning
@@ -171,7 +174,7 @@ class FileTracker:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT status, retries FROM processed_files WHERE file_path = ?",
-                (file_path,)
+                (file_path,),
             )
             row = cursor.fetchone()
             if row is None:
@@ -181,7 +184,7 @@ class FileTracker:
             retries = retries or 0
 
             # If status is error and we haven't exceeded max retries, allow retry
-            if status == 'error' and retries < max_retries:
+            if status == "error" and retries < max_retries:
                 return False
 
             return True
@@ -204,7 +207,7 @@ class FileTracker:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "SELECT content_hash FROM processed_files WHERE file_path = ?",
-                (file_path,)
+                (file_path,),
             )
             row = cursor.fetchone()
             if row is None:
@@ -217,8 +220,8 @@ class FileTracker:
         self,
         file_path: str,
         chunk_count: int = 0,
-        status: str = 'success',
-        error_message: str = None
+        status: str = "success",
+        error_message: str = None,
     ):
         """
         Mark a file as processed.
@@ -235,10 +238,10 @@ class FileTracker:
 
         # Get current retry count if this is a retry
         retries = 0
-        if status == 'error':
+        if status == "error":
             existing = self.get_file_info(file_path)
-            if existing and existing.get('status') == 'error':
-                retries = (existing.get('retries') or 0) + 1
+            if existing and existing.get("status") == "error":
+                retries = (existing.get("retries") or 0) + 1
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -247,12 +250,23 @@ class FileTracker:
                 (file_path, content_hash, file_size, processed_at, chunk_count, status, retries, error_message)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (file_path, content_hash, file_size, processed_at, chunk_count, status, retries, error_message)
+                (
+                    file_path,
+                    content_hash,
+                    file_size,
+                    processed_at,
+                    chunk_count,
+                    status,
+                    retries,
+                    error_message,
+                ),
             )
             conn.commit()
 
-        if status == 'error':
-            logger.debug(f"Marked file as {status} (retry {retries}): {file_path} - {error_message}")
+        if status == "error":
+            logger.debug(
+                f"Marked file as {status} (retry {retries}): {file_path} - {error_message}"
+            )
         else:
             logger.debug(f"Marked file as {status}: {file_path} ({chunk_count} chunks)")
 
@@ -275,7 +289,7 @@ class FileTracker:
                 FROM processed_files
                 WHERE file_path = ?
                 """,
-                (file_path,)
+                (file_path,),
             )
             row = cursor.fetchone()
 
@@ -312,8 +326,7 @@ class FileTracker:
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "DELETE FROM processed_files WHERE file_path = ?",
-                (file_path,)
+                "DELETE FROM processed_files WHERE file_path = ?", (file_path,)
             )
             conn.commit()
 
@@ -341,9 +354,9 @@ class FileTracker:
             row = cursor.fetchone()
 
             return {
-                'total_files': row[0] or 0,
-                'total_chunks': row[1] or 0,
-                'total_size_bytes': row[2] or 0,
-                'successful': row[3] or 0,
-                'errors': row[4] or 0
+                "total_files": row[0] or 0,
+                "total_chunks": row[1] or 0,
+                "total_size_bytes": row[2] or 0,
+                "successful": row[3] or 0,
+                "errors": row[4] or 0,
             }
