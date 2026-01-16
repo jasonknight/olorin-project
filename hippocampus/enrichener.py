@@ -14,6 +14,7 @@ Data Flow:
 from kafka import KafkaConsumer, KafkaProducer
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -27,9 +28,11 @@ from chromadb.config import Settings
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
-from libs.embeddings import Embedder
+from libs.embeddings import get_embedder
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
+from libs.persistent_log import get_persistent_log
+from libs.state import State
 
 # Initialize config with hot-reload support
 config = Config(watch=True)
@@ -317,9 +320,9 @@ class PromptEnricher:
             raise
 
     def _init_embedding_model(self):
-        """Initialize embedder (shared singleton)"""
+        """Initialize embedder (local or API-based depending on config)"""
         try:
-            self.embedder = Embedder.get_instance()
+            self.embedder = get_embedder()
             logger.info(
                 f"Embedder ready: {self.embedder.model_name} (dimension: {self.embedder.dimension})"
             )
@@ -460,15 +463,57 @@ class PromptEnricher:
                     },
                 ],
                 temperature=self.config.decision_temperature,
-                max_tokens=10,
                 timeout=self.config.llm_timeout_seconds,
             )
 
-            answer = response.choices[0].message.content.strip().upper()
-            needs_enrichment = answer.startswith("YES")
+            raw_answer = response.choices[0].message.content.strip()
+
+            # Log the LLM decision response to persistent log
+            plog = get_persistent_log()
+            plog.log(
+                component="enrichener",
+                direction="ai_response",
+                content={
+                    "type": "decision",
+                    "prompt": prompt,
+                    "raw_answer": raw_answer,
+                    "model": model_to_use,
+                },
+                metadata={"temperature": self.config.decision_temperature},
+            )
+
+            # Strip thinking blocks (handles <think>...</think> and <thinking>...</thinking>)
+            # Also handle incomplete/truncated thinking blocks that may lack closing tags
+            thinking_pattern = r"<think(?:ing)?>.*?</think(?:ing)?>"
+            answer = re.sub(
+                thinking_pattern, "", raw_answer, flags=re.DOTALL | re.IGNORECASE
+            )
+            # Handle incomplete thinking blocks (no closing tag due to max_tokens truncation)
+            incomplete_thinking_pattern = r"<think(?:ing)?>.*$"
+            answer = (
+                re.sub(
+                    incomplete_thinking_pattern,
+                    "",
+                    answer,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                .strip()
+                .upper()
+            )
+
+            # If answer is empty or unparseable, default to YES (err on side of enrichment)
+            if not answer or (
+                not answer.startswith("YES") and not answer.startswith("NO")
+            ):
+                logger.warning(
+                    f"[{thread_name}] Unparseable decision response: '{raw_answer[:100]}', defaulting to YES"
+                )
+                needs_enrichment = True
+            else:
+                needs_enrichment = answer.startswith("YES")
 
             logger.info(
-                f"[{thread_name}] Enrichment decision: {answer} -> {needs_enrichment}"
+                f"[{thread_name}] Enrichment decision: {answer[:50]} -> {needs_enrichment}"
             )
             return needs_enrichment
 
@@ -608,6 +653,21 @@ class PromptEnricher:
         try:
             self.producer.send(self.config.kafka_output_topic, value=output_message)
             self.producer.flush()
+
+            # Log produced message to persistent log
+            plog = get_persistent_log()
+            plog.log(
+                component="enrichener",
+                direction="produced",
+                content=output_message,
+                message_id=message_id,
+                topic=self.config.kafka_output_topic,
+                metadata={
+                    "context_available": context_available,
+                    "contexts_stored": contexts_stored,
+                },
+            )
+
             logger.info(
                 f"[{thread_name}] Produced message to '{self.config.kafka_output_topic}'"
             )
@@ -657,6 +717,28 @@ class PromptEnricher:
             logger.info(
                 f"[{thread_name}]   Prompt: {prompt[:100]}{'...' if len(prompt) > 100 else ''}"
             )
+
+            # Log received message to persistent log
+            plog = get_persistent_log()
+            plog.log(
+                component="enrichener",
+                direction="received",
+                content={"prompt": prompt, "raw_message": message},
+                message_id=message_id,
+                topic=self.config.kafka_input_topic,
+            )
+
+            # Check if auto-context is enabled (defaults to True if not set)
+            state = State()
+            auto_context_enabled = state.get_bool(
+                "enrichener.auto_context", default=True
+            )
+            if not auto_context_enabled:
+                logger.info(
+                    f"[{thread_name}] Auto-context disabled, forwarding prompt without enrichment"
+                )
+                self._produce_message(prompt, message_id, message_id, False)
+                return
 
             # Notify user via Broca that context retrieval is starting
             self._notify_broca("Retrieving context, one moment...")

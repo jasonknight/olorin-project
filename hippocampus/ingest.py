@@ -18,7 +18,7 @@ from chromadb.config import Settings
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
-from libs.embeddings import Embedder
+from libs.embeddings import get_embedder
 from libs.olorin_logging import OlorinLogger
 
 # Add broca directory to path for producer import
@@ -90,8 +90,8 @@ class DocumentIngestionPipeline:
             min_chunk_size=self.chunk_min_size,
         )
 
-        # Initialize embedder (shared singleton)
-        self.embedder = Embedder.get_instance(config=config)
+        # Initialize embedder (local or API-based depending on config)
+        self.embedder = get_embedder(config=config)
         self.logger.info(
             f"Embedder ready: {self.embedder.model_name} (dimension: {self.embedder.dimension})"
         )

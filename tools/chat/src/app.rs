@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
+use tiktoken_rs::cl100k_base;
 use tui_textarea::TextArea;
 
 use crate::api::{self, SlashCommand};
@@ -49,6 +50,8 @@ pub struct App<'a> {
     pub slash_commands: Vec<SlashCommand>,
     /// Current autocomplete ghost text (portion to append)
     pub completion: Option<String>,
+    /// Total token count for all messages in the chat
+    pub token_count: usize,
 }
 
 impl<'a> App<'a> {
@@ -91,6 +94,7 @@ impl<'a> App<'a> {
             control_api_url: control_api_url.to_string(),
             slash_commands,
             completion: None,
+            token_count: 0,
         })
     }
 
@@ -144,6 +148,8 @@ impl<'a> App<'a> {
 
     /// Process events from background threads
     pub fn process_events(&mut self) {
+        let mut messages_changed = false;
+
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 AppEvent::NewChatMessages(messages) => {
@@ -156,6 +162,7 @@ impl<'a> App<'a> {
                     if self.auto_scroll {
                         self.scroll_offset = 0;
                     }
+                    messages_changed = true;
                 }
                 AppEvent::UpdatedChatMessages(updated_messages) => {
                     // Update existing messages in place (for streaming updates)
@@ -176,12 +183,40 @@ impl<'a> App<'a> {
                     if self.auto_scroll {
                         self.scroll_offset = 0;
                     }
+                    messages_changed = true;
                 }
                 AppEvent::Error(err) => {
                     self.status = format!("Error: {}", err);
                 }
             }
         }
+
+        // Recalculate token count if messages changed
+        if messages_changed {
+            self.recalculate_token_count();
+        }
+    }
+
+    /// Recalculate the total token count for all messages
+    fn recalculate_token_count(&mut self) {
+        let bpe = match cl100k_base() {
+            Ok(bpe) => bpe,
+            Err(_) => {
+                self.token_count = 0;
+                return;
+            }
+        };
+
+        let mut total = 0;
+        for msg in &self.messages {
+            if let DisplayMessage::Chat(chat_msg) = msg {
+                // Count tokens in the message content
+                total += bpe.encode_with_special_tokens(&chat_msg.content).len();
+                // Add overhead for role (roughly 4 tokens per message for role/formatting)
+                total += 4;
+            }
+        }
+        self.token_count = total;
     }
 
     /// Send the current input as a prompt
@@ -309,6 +344,7 @@ impl<'a> App<'a> {
                     // Clear the display when /clear command succeeds
                     if command_name == "/clear" {
                         self.messages.clear();
+                        self.token_count = 0;
                     }
                 } else {
                     self.status = format!(

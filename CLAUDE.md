@@ -227,15 +227,15 @@ tail -f logs/hippocampus-pdf-tracker.log
 - `chromadb.host` - ChromaDB server (default: localhost)
 - `chromadb.port` - ChromaDB port (default: 8000)
 - `chromadb.collection` - Collection name (default: documents)
-- `embedding_model` - sentence-transformers model (default: all-MiniLM-L6-v2)
-- `chunking.size` - Target chunk size in characters (default: 1000)
-- `chunking.overlap` - Overlap between chunks (default: 200)
+- `embedding_model` - sentence-transformers model (default: nomic-ai/nomic-embed-text-v1.5)
+- `chunking.size` - Target chunk size in characters (default: 4000)
+- `chunking.overlap` - Overlap between chunks (default: 400)
 - `poll_interval` - Seconds between directory scans (default: 5)
 
 **Features**:
 - Continuous file monitoring
 - Semantic chunking by markdown structure
-- Local embeddings (no API keys)
+- Centralized embeddings via tool server (model loaded once, shared across components)
 - Content-hash based change detection
 - PDF to markdown conversion with Ollama-based filtering
 - EPUB/MOBI ebook to markdown conversion
@@ -517,6 +517,10 @@ For functions the AI model can call during inference (OpenAI function calling). 
     "write": {
       "enabled": true,
       "port": 8770
+    },
+    "embeddings": {
+      "enabled": true,
+      "port": 8771
     }
   }
 }
@@ -524,6 +528,7 @@ For functions the AI model can call during inference (OpenAI function calling). 
 
 **Existing Tools**:
 - `write` (Rust, port 8770) - Write files to ~/Documents/AI_OUT
+- `embeddings` (Python, port 8771) - Generate text embeddings for documents/queries
 
 **Creating New Tools**:
 1. Create `tools/<name>/` directory

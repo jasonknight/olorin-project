@@ -161,6 +161,57 @@ start_rust_tool() {
     return 0
 }
 
+# Function to start a Python tool server
+start_python_tool() {
+    local name=$1
+    local port=$2
+    local script=${3:-"server.py"}
+    local dir="tools/${name}"
+
+    echo -e "${YELLOW}Starting ${name} tool server...${NC}"
+
+    cd "$SCRIPT_DIR"
+
+    if [ ! -f "${dir}/${script}" ]; then
+        echo -e "${RED}No ${script} found for ${name} tool, skipping${NC}"
+        return 1
+    fi
+
+    cd "${dir}"
+
+    # Check if virtual environment exists
+    if [ ! -d "venv" ]; then
+        echo -e "${YELLOW}Creating virtual environment for ${name} tool...${NC}"
+        python3 -m venv venv
+    fi
+
+    source venv/bin/activate
+
+    # Install/update requirements if requirements.txt exists
+    if [ -f "requirements.txt" ]; then
+        echo -e "${YELLOW}Installing requirements for ${name} tool...${NC}"
+        pip install -q -r requirements.txt > "../../logs/tool-${name}-setup.log" 2>&1
+    fi
+
+    # Install parent libs dependencies (for libs imports)
+    pip install -q flask waitress requests numpy sentence-transformers >> "../../logs/tool-${name}-setup.log" 2>&1
+
+    # Start the tool server
+    nohup python3 -u "${script}" --port "$port" > "../../logs/tool-${name}.log" 2>&1 &
+    local pid=$!
+    echo $pid > "../../.pids/tool-${name}.pid"
+    echo -e "${GREEN}Started ${name} tool server (PID: $pid, port: $port)${NC}"
+
+    cd "$SCRIPT_DIR"
+
+    # Update state database
+    update_state "system.pids.tool-${name}" "$pid" "int"
+    update_state "tools.${name}.status" "running" "string"
+    update_state "tools.${name}.port" "$port" "int"
+
+    return 0
+}
+
 # 1. Start Broca (Kafka)
 echo -e "\n${GREEN}=== Starting Broca (Kafka) ===${NC}"
 cd broca
@@ -227,11 +278,15 @@ echo -e "\n${GREEN}=== Starting Exo (AI Inference) ===${NC}"
 # 4. Start AI tool servers (before consumers so tools are available for discovery)
 echo -e "\n${GREEN}=== Starting AI Tool Servers ===${NC}"
 
-# Start the write tool server
+# Start the write tool server (Rust)
 start_rust_tool "write" "8770"
 
+# Start the embeddings tool server (Python)
+# Note: This loads the embedding model which takes time on first run
+start_python_tool "embeddings" "8771"
+
 # Give tool servers a moment to start
-sleep 1
+sleep 2
 
 # 5. Start all consumer and tracking scripts
 echo -e "\n${GREEN}=== Starting Consumer Scripts ===${NC}"

@@ -692,10 +692,18 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ""
     };
 
+    // Format token count with K suffix for thousands
+    let token_display = if app.token_count >= 1000 {
+        format!("{:.1}K", app.token_count as f64 / 1000.0)
+    } else {
+        format!("{}", app.token_count)
+    };
+
     let status_text = format!(
-        " {} | Msgs: {}{} | {}Enter: Send | Shift+Enter: Newline | Esc: Quit ",
+        " {} | Msgs: {} | Tokens: {}{} | {}Enter: Send | Shift+Enter: Newline | Esc: Quit ",
         app.status,
         app.message_count(),
+        token_display,
         scroll_indicator,
         tab_hint
     );

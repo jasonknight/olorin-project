@@ -17,6 +17,7 @@ from libs.config import Config
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
 from libs.chat_store import ChatStore
+from libs.persistent_log import get_persistent_log
 from libs.state import get_state
 from libs.tool_client import ToolClient
 
@@ -1258,6 +1259,20 @@ User's question: {prompt}"""
             )
             logger.info(f"[{thread_name}]   Prompt length: {len(prompt)} characters")
 
+            # Log received message to persistent log
+            plog = get_persistent_log()
+            plog.log(
+                component="cortex",
+                direction="received",
+                content={"prompt": prompt, "raw_message": message},
+                message_id=message_id,
+                topic=self.config.kafka_input_topic,
+                metadata={
+                    "context_available": context_available,
+                    "contexts_stored": contexts_stored,
+                },
+            )
+
             # Check for conversation reset command
             if self._is_reset_command(prompt):
                 logger.info(f"[{thread_name}] 🔄 Reset command detected: '{prompt}'")
@@ -1676,6 +1691,25 @@ User's question: {prompt}"""
             )
             logger.info(f"[{thread_name}]   Finish reason: {finish_reason}")
 
+            # Log AI response to persistent log
+            plog = get_persistent_log()
+            plog.log(
+                component="cortex",
+                direction="ai_response",
+                content={
+                    "full_response": full_response_text,
+                    "model": model_to_use,
+                    "finish_reason": finish_reason,
+                },
+                message_id=message_id,
+                metadata={
+                    "chunk_count": chunk_count,
+                    "chunks_sent": chunks_sent,
+                    "api_duration": api_duration,
+                    "response_length": len(full_response_text),
+                },
+            )
+
             # Handle tool calls if the model requested them
             if finish_reason == "tool_calls" and accumulated_tool_calls:
                 logger.info(f"[{thread_name}] 🔧 TOOL CALLS DETECTED!")
@@ -1870,6 +1904,17 @@ User's question: {prompt}"""
                 "timestamp": datetime.now().isoformat(),
             }
             logger.info(f"[{thread_name}] Error message prepared: {error_message}")
+
+            # Log error to persistent log
+            plog = get_persistent_log()
+            plog.log(
+                component="cortex",
+                direction="error",
+                content={"error": str(e), "error_type": type(e).__name__},
+                message_id=message_id,
+                metadata={"error_message": error_message},
+            )
+
             logger.info(f"[{thread_name}] Attempting to send error to output topic...")
             try:
                 self.producer.send(self.config.kafka_output_topic, value=error_message)

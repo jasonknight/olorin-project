@@ -141,6 +141,7 @@ process_patterns=(
     "python3.*office_tracker.py"
     "python3.*query.py"
     "python3.*enrichener.py"
+    "python3.*tools/embeddings/server.py"
 )
 
 remaining_killed=0
@@ -210,7 +211,7 @@ echo ""
 # Verify no processes are still running
 echo "Verification:"
 echo -e "${YELLOW}Checking for any remaining olorin processes...${NC}"
-remaining=$(ps aux | grep -E "python3.*(consumer|producer|controller|ingest|pdf_tracker|ebook_tracker|txt_tracker|office_tracker|query|enrichener)\.py" | grep -v grep || true)
+remaining=$(ps aux | grep -E "python3.*(consumer|producer|controller|ingest|pdf_tracker|ebook_tracker|txt_tracker|office_tracker|query|enrichener|tools/embeddings/server)\.py" | grep -v grep || true)
 if [ -z "$remaining" ]; then
     echo -e "  ${GREEN}✓ No Python processes running${NC}"
 else

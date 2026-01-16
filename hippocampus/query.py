@@ -15,7 +15,7 @@ from chromadb.config import Settings
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
-from libs.embeddings import Embedder
+from libs.embeddings import get_embedder
 
 # Initialize config
 config = Config()
@@ -48,8 +48,8 @@ class QueryREPL:
                 "Warning: No documents in collection. Run ingest.py first to add documents."
             )
 
-        # Initialize embedder (shared singleton)
-        self.embedder = Embedder.get_instance(config=config)
+        # Initialize embedder (local or API-based depending on config)
+        self.embedder = get_embedder(config=config)
         print(f"Embedder ready: {self.embedder.model_name}")
 
         # Cache all documents for direct search

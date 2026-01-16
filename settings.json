@@ -40,7 +40,6 @@
       "port": 8000,
       "collection": "documents"
     },
-    "embedding_model": "nomic-ai/nomic-embed-text-v1.5",
     "chunking": {
       "size": 4000,
       "overlap": 400,
@@ -91,6 +90,13 @@
     "write": {
       "enabled": true,
       "port": 8770
+    },
+    "embeddings": {
+      "enabled": true,
+      "port": 8771,
+      "model": "nomic-ai/nomic-embed-text-v1.5",
+      "document_prefix": "search_document: ",
+      "query_prefix": "search_query: "
     }
   }
 }

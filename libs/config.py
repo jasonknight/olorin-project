@@ -43,7 +43,6 @@ _KEY_TO_PATH = {
     "CHROMADB_HOST": "hippocampus.chromadb.host",
     "CHROMADB_PORT": "hippocampus.chromadb.port",
     "CHROMADB_COLLECTION": "hippocampus.chromadb.collection",
-    "EMBEDDING_MODEL": "hippocampus.embedding_model",
     "CHUNK_SIZE": "hippocampus.chunking.size",
     "CHUNK_OVERLAP": "hippocampus.chunking.overlap",
     "CHUNK_MIN_SIZE": "hippocampus.chunking.min_size",
@@ -81,6 +80,12 @@ _KEY_TO_PATH = {
     # Tools (AI tool use)
     "TOOLS_WRITE_ENABLED": "tools.write.enabled",
     "TOOLS_WRITE_PORT": "tools.write.port",
+    "EMBEDDINGS_TOOL_ENABLED": "tools.embeddings.enabled",
+    "EMBEDDINGS_TOOL_PORT": "tools.embeddings.port",
+    "EMBEDDINGS_TOOL_HOST": "tools.embeddings.host",
+    "EMBEDDINGS_TOOL_MODEL": "tools.embeddings.model",
+    "EMBEDDINGS_DOCUMENT_PREFIX": "tools.embeddings.document_prefix",
+    "EMBEDDINGS_QUERY_PREFIX": "tools.embeddings.query_prefix",
 }
 
 
