@@ -318,6 +318,9 @@ class ExoConsumer:
             f"Inference client initialized (backend: {self.inference.backend_type.value})"
         )
 
+        # Cache model capabilities for context validation
+        self._model_capabilities = None  # Will be populated on first use
+
         # Initialize context store for reading enriched contexts
         self._init_context_store()
 
@@ -398,6 +401,98 @@ class ExoConsumer:
             )
 
         return self._tools_supported
+
+    def check_model_capabilities(self, model: str | None = None) -> None:
+        """
+        Check and cache model capabilities, logging warnings for problematic configurations.
+
+        This detects issues like sliding window attention that can cause context
+        to be silently truncated, leading to confusing "I don't have that information"
+        responses even when context was provided.
+
+        Args:
+            model: Model to check (uses running model if None)
+        """
+        thread_name = threading.current_thread().name
+
+        capabilities = self.inference.get_model_capabilities(model)
+        if capabilities is None:
+            logger.warning(
+                f"[{thread_name}] Could not retrieve model capabilities - "
+                "context validation will be skipped"
+            )
+            return
+
+        self._model_capabilities = capabilities
+
+        # Store capabilities in state.db for visibility
+        try:
+            self._state.set_string("cortex.model_id", capabilities.model_id)
+            self._state.set_int("cortex.context_length", capabilities.context_length)
+            if capabilities.sliding_window:
+                self._state.set_int(
+                    "cortex.sliding_window", capabilities.sliding_window
+                )
+            else:
+                self._state.delete("cortex.sliding_window")
+            self._state.set_int(
+                "cortex.effective_context", capabilities.effective_context
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{thread_name}] Failed to store model capabilities in state.db: {e}"
+            )
+
+        # Log capability summary
+        logger.info(f"[{thread_name}] Model capabilities for {capabilities.model_id}:")
+        logger.info(
+            f"[{thread_name}]   Context length: {capabilities.context_length:,} tokens"
+        )
+
+        if capabilities.has_sliding_window:
+            logger.error(
+                f"[{thread_name}] ⚠️ CRITICAL: Model uses SLIDING WINDOW ATTENTION "
+                f"({capabilities.sliding_window:,} tokens)!"
+            )
+            logger.error(
+                f"[{thread_name}]   This model can only 'see' the last "
+                f"{capabilities.sliding_window:,} tokens when generating responses."
+            )
+            logger.error(
+                f"[{thread_name}]   RAG context and conversation history beyond this "
+                "window will be INVISIBLE to the model."
+            )
+            logger.error(
+                f"[{thread_name}]   Consider using a model with full attention for "
+                "RAG/long context use cases."
+            )
+        else:
+            logger.info(f"[{thread_name}]   Attention: Full (no sliding window)")
+            logger.info(
+                f"[{thread_name}]   Effective context: {capabilities.effective_context:,} tokens"
+            )
+
+    def validate_message_context(
+        self, messages: list[dict], model: str | None = None
+    ) -> tuple[bool, str | None]:
+        """
+        Validate that messages fit within the model's context window.
+
+        Args:
+            messages: List of message dicts to validate
+            model: Model to check against (uses cached capabilities if None)
+
+        Returns:
+            Tuple of (fits: bool, warning_message: Optional[str])
+        """
+        # Use cached capabilities or fetch if needed
+        if self._model_capabilities is None:
+            self.check_model_capabilities(model)
+
+        if self._model_capabilities is None:
+            return (True, None)  # Can't validate, assume OK
+
+        return self._model_capabilities.check_context_fit(messages)
 
     def _init_context_store(self):
         """Initialize context store for reading enriched contexts from hippocampus"""
@@ -761,12 +856,25 @@ When you decide to use a tool, call it with the required parameters. After the t
         thread_name = threading.current_thread().name
         messages = []
 
-        # Add system prompt for tools if available
-        tool_system_prompt = self._build_tool_system_prompt()
-        if tool_system_prompt:
-            messages.append({"role": "system", "content": tool_system_prompt})
+        # Skip tool system prompt when significant RAG context is provided
+        # Small models get confused trying to use tools when they should answer from context
+        # Threshold: if context is more than 10KB, prioritize RAG over tools
+        context_size = sum(len(c.get("content", "")) for c in (context_chunks or []))
+        skip_tools_for_rag = context_size > 10000  # 10KB threshold
+
+        # Add system prompt for tools if available (and not doing heavy RAG)
+        tool_system_prompt = None
+        if not skip_tools_for_rag:
+            tool_system_prompt = self._build_tool_system_prompt()
+            if tool_system_prompt:
+                messages.append({"role": "system", "content": tool_system_prompt})
+                logger.info(
+                    f"[{thread_name}] Added tool system prompt ({len(tool_system_prompt)} chars)"
+                )
+        else:
             logger.info(
-                f"[{thread_name}] Added tool system prompt ({len(tool_system_prompt)} chars)"
+                f"[{thread_name}] Skipping tool system prompt - RAG context is {context_size:,} chars "
+                "(tools disabled for large context to prevent model confusion)"
             )
 
         # If chat history is disabled, just return the current prompt
@@ -1388,15 +1496,56 @@ User's question: {prompt}"""
                 "stream": True,  # Enable streaming for faster response
             }
             logger.info(f"[{thread_name}]   Messages in array: {len(messages)}")
+            # DEBUG: Log each message in the array to diagnose history issues
+            for i, msg in enumerate(messages):
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                content_preview = (
+                    content[:100] + "..." if len(content) > 100 else content
+                )
+                logger.info(
+                    f"[{thread_name}]   Message {i}: role={role}, len={len(content)}, preview={content_preview!r}"
+                )
+
+            # Validate context window before API call
+            fits, context_warning = self.validate_message_context(
+                messages, model_to_use
+            )
+            if context_warning:
+                logger.warning(f"[{thread_name}] {context_warning}")
+                # Also send warning to persistent log and output topic
+                plog = get_persistent_log()
+                plog.log("cortex", "warning", context_warning)
+
+                # If context doesn't fit and we have sliding window, this is critical
+                if not fits and self._model_capabilities:
+                    if self._model_capabilities.has_sliding_window:
+                        logger.error(
+                            f"[{thread_name}] 🚨 CRITICAL: Context exceeds sliding window! "
+                            "The model will NOT be able to see your context/history. "
+                            "Response may be incorrect or claim lack of information."
+                        )
+
             # Only add max_tokens if explicitly set
             if self.config.max_tokens is not None:
                 api_params["max_tokens"] = self.config.max_tokens
 
             # Add tools if available and supported
-            if self.available_tools:
+            # Skip tools when doing heavy RAG to prevent model confusion
+            context_size = sum(
+                len(c.get("content", "")) for c in (context_chunks or [])
+            )
+            skip_tools_for_rag = context_size > 10000  # 10KB threshold
+
+            if self.available_tools and not skip_tools_for_rag:
                 api_params["tools"] = self.available_tools
                 tool_names = [t["function"]["name"] for t in self.available_tools]
                 logger.info(f"[{thread_name}] 🔧 Tools enabled: {tool_names}")
+            elif self.available_tools and skip_tools_for_rag:
+                logger.info(
+                    f"[{thread_name}] 🔧 Tools DISABLED for this request - "
+                    f"RAG context is {context_size:,} chars (threshold: 10,000)"
+                )
 
             logger.info(f"[{thread_name}] 🌊 Starting STREAMING API call...")
             # Access underlying client for raw streaming (complex processing requires OpenAI format)
@@ -2009,6 +2158,16 @@ User's question: {prompt}"""
         logger.info("Using threaded message processing to prevent Kafka rebalancing")
         logger.info("Waiting for prompts...")
         logger.info("=" * 60)
+
+        # Check model capabilities at startup (detects sliding window attention, etc.)
+        logger.info("Checking model capabilities...")
+        self.check_model_capabilities()
+        if self._model_capabilities and self._model_capabilities.has_sliding_window:
+            logger.error("=" * 60)
+            logger.error(
+                "⚠️  WARNING: Model has sliding window attention - RAG may not work!"
+            )
+            logger.error("=" * 60)
 
         # Detect tool call support at startup
         logger.info("Checking tool call support...")

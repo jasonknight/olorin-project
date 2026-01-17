@@ -145,6 +145,9 @@ class ToolClient:
         tool_meta = self._tools_cache[name]
         base_url = tool_meta["_base_url"]
 
+        # Log the arguments being sent for debugging
+        logger.info(f"Tool '{name}' called with arguments: {arguments}")
+
         try:
             response = requests.post(
                 f"{base_url}/call",

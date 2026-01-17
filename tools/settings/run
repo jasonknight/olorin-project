@@ -1,0 +1,14 @@
+#!/bin/bash
+# Run the Olorin Settings TUI
+
+cd "$(dirname "$0")"
+
+# Build if needed
+if [ ! -f target/release/olorin-settings ] || [ Cargo.toml -nt target/release/olorin-settings ] || [ -n "$(find src -newer target/release/olorin-settings 2>/dev/null)" ]; then
+    echo "Building olorin-settings..."
+    cargo build --release || exit 1
+fi
+
+# Run from project root so config paths resolve correctly
+cd ../..
+exec ./tools/settings/target/release/olorin-settings "$@"

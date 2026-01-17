@@ -80,6 +80,109 @@ class ModelInfo:
     backend: BackendType
 
 
+@dataclass
+class ModelCapabilities:
+    """
+    Context window and attention capabilities of a model.
+
+    Used to detect potential context overflow issues before they cause
+    silent failures (like sliding window attention truncation).
+    """
+
+    model_id: str
+    context_length: int  # Maximum context window in tokens
+    sliding_window: Optional[int] = None  # If set, limits effective attention span
+    rope_scaling_original_context: Optional[int] = (
+        None  # Original context before scaling
+    )
+
+    @property
+    def effective_context(self) -> int:
+        """
+        Return the effective context length considering sliding window.
+
+        For models with sliding window attention, the effective context is
+        limited by the sliding window size, not the full context length.
+        """
+        if self.sliding_window is not None and self.sliding_window > 0:
+            return self.sliding_window
+        return self.context_length
+
+    @property
+    def has_sliding_window(self) -> bool:
+        """Check if model uses sliding window attention."""
+        return self.sliding_window is not None and self.sliding_window > 0
+
+    def estimate_tokens(self, text: str) -> int:
+        """
+        Estimate token count for text.
+
+        Uses a simple heuristic of ~4 characters per token for English text.
+        This is approximate but sufficient for warning purposes.
+        """
+        return len(text) // 4
+
+    def estimate_messages_tokens(self, messages: list[dict]) -> int:
+        """
+        Estimate total token count for a messages array.
+
+        Accounts for message overhead (role tags, separators, etc.)
+        """
+        total = 0
+        for msg in messages:
+            # Add overhead for message structure (~10 tokens per message)
+            total += 10
+            content = msg.get("content", "")
+            if content:
+                total += self.estimate_tokens(content)
+            # Tool calls add extra tokens
+            if msg.get("tool_calls"):
+                total += 50  # Rough estimate for tool call overhead
+        return total
+
+    def check_context_fit(self, messages: list[dict]) -> tuple[bool, Optional[str]]:
+        """
+        Check if messages fit within the model's effective context.
+
+        Returns:
+            Tuple of (fits: bool, warning_message: Optional[str])
+            - If fits is True, warning_message is None
+            - If fits is False, warning_message explains the issue
+        """
+        estimated_tokens = self.estimate_messages_tokens(messages)
+
+        # Check against sliding window first (most restrictive)
+        if self.has_sliding_window:
+            if estimated_tokens > self.sliding_window:
+                return (
+                    False,
+                    f"⚠️ CONTEXT OVERFLOW: Estimated {estimated_tokens:,} tokens exceeds "
+                    f"model's sliding window attention of {self.sliding_window:,} tokens. "
+                    f"The model can only 'see' the last {self.sliding_window:,} tokens when generating. "
+                    f"Earlier context will be effectively invisible. "
+                    f"Consider using a model without sliding window attention for RAG/long context.",
+                )
+
+        # Check against full context window
+        if estimated_tokens > self.context_length:
+            return (
+                False,
+                f"⚠️ CONTEXT OVERFLOW: Estimated {estimated_tokens:,} tokens exceeds "
+                f"model's context window of {self.context_length:,} tokens. "
+                f"Messages may be truncated.",
+            )
+
+        # Warn if close to limit (>80%)
+        if estimated_tokens > self.context_length * 0.8:
+            return (
+                True,
+                f"⚠️ Context usage high: {estimated_tokens:,} tokens "
+                f"({estimated_tokens * 100 // self.context_length}% of {self.context_length:,} limit)",
+            )
+
+        return (True, None)
+
+
 class InferenceBackend(ABC):
     """
     Abstract base class for inference backends.
@@ -173,6 +276,42 @@ class InferenceBackend(ABC):
     def backend_type(self) -> BackendType:
         """Return the backend type."""
         pass
+
+    @abstractmethod
+    def get_model_capabilities(
+        self, model: Optional[str] = None
+    ) -> Optional[ModelCapabilities]:
+        """
+        Get context window and attention capabilities for a model.
+
+        Args:
+            model: Model to query (uses default if None)
+
+        Returns:
+            ModelCapabilities with context window info, or None if unavailable
+        """
+        pass
+
+    def validate_context(
+        self, messages: list[dict], model: Optional[str] = None
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Validate that messages fit within the model's context window.
+
+        This is a convenience method that combines get_model_capabilities
+        and check_context_fit.
+
+        Args:
+            messages: List of message dicts to validate
+            model: Model to check against (uses default if None)
+
+        Returns:
+            Tuple of (fits: bool, warning_message: Optional[str])
+        """
+        capabilities = self.get_model_capabilities(model)
+        if capabilities is None:
+            return (True, None)  # Can't validate, assume OK
+        return capabilities.check_context_fit(messages)
 
 
 class ExoBackend(InferenceBackend):
@@ -315,6 +454,33 @@ class ExoBackend(InferenceBackend):
             return response.status_code == 200
         except Exception:
             return False
+
+    def get_model_capabilities(
+        self, model: Optional[str] = None
+    ) -> Optional[ModelCapabilities]:
+        """
+        Get model capabilities for EXO.
+
+        EXO doesn't expose detailed model info, so we return a conservative
+        default based on common model configurations. Users should monitor
+        for context-related errors.
+
+        Returns:
+            ModelCapabilities with conservative defaults, or None if no model
+        """
+        model_id = model or self._default_model or self.get_running_model()
+        if not model_id:
+            return None
+
+        # EXO doesn't expose model metadata, so we use conservative defaults
+        # Most models support at least 4K context, many support 8K-32K
+        # We default to 8K as a reasonable middle ground
+        return ModelCapabilities(
+            model_id=model_id,
+            context_length=8192,  # Conservative default
+            sliding_window=None,  # Assume full attention
+            rope_scaling_original_context=None,
+        )
 
     def supports_tools(self, model: Optional[str] = None) -> bool:
         """
@@ -544,8 +710,13 @@ class OllamaBackend(InferenceBackend):
     """
     Ollama inference backend.
 
-    Placeholder for future Ollama support. Ollama provides a local LLM server
-    with its own API format, but also supports OpenAI-compatible endpoints.
+    Ollama provides a local LLM server with its own REST API at /api/chat.
+    This backend handles Ollama-specific features including:
+    - Model listing via /api/tags
+    - Streaming and non-streaming chat completions
+    - Tool/function calling support (for compatible models)
+
+    API Reference: https://github.com/ollama/ollama/blob/main/docs/api.md
     """
 
     def __init__(
@@ -555,32 +726,324 @@ class OllamaBackend(InferenceBackend):
         default_temperature: float = 0.7,
         default_max_tokens: Optional[int] = None,
     ):
+        """
+        Initialize the Ollama backend.
+
+        Args:
+            base_url: Ollama API base URL (e.g., http://localhost:11434)
+            default_model: Default model to use (None = auto-detect first available)
+            default_temperature: Default temperature for completions
+            default_max_tokens: Default max tokens (None = no limit)
+        """
         self._base_url = base_url.rstrip("/")
         self._default_model = default_model
         self._default_temperature = default_temperature
         self._default_max_tokens = default_max_tokens
 
-        logger.info(f"OllamaBackend initialized with base_url={self._base_url}")
-        raise NotImplementedError(
-            "Ollama backend not yet implemented. "
-            "Set inference.backend to 'exo' in settings.json"
+        # Initialize OpenAI client for Ollama's OpenAI-compatible endpoint
+        # Ollama exposes OpenAI-compatible API at /v1
+        self._client = OpenAI(
+            base_url=f"{self._base_url}/v1",
+            api_key="ollama",  # Ollama doesn't require a real key
         )
+
+        # Tool support cache
+        self._tools_supported: Optional[bool] = None
+        self._tools_model: Optional[str] = None
+
+        logger.info(f"OllamaBackend initialized with base_url={self._base_url}")
 
     @property
     def backend_type(self) -> BackendType:
         return BackendType.OLLAMA
 
+    @property
+    def client(self) -> OpenAI:
+        """Return the underlying OpenAI client for advanced use cases."""
+        return self._client
+
     def get_running_model(self) -> Optional[str]:
-        # TODO: Query /api/tags for available models
-        raise NotImplementedError()
+        """
+        Query Ollama /api/tags for available models.
+
+        Returns the configured default model if set, otherwise returns the
+        first available model from the local Ollama instance.
+
+        Returns:
+            Model name string or None if no models available
+        """
+        thread_name = threading.current_thread().name
+
+        # Return configured model if set
+        if self._default_model:
+            logger.debug(
+                f"[{thread_name}] Using configured model: {self._default_model}"
+            )
+            return self._default_model
+
+        logger.debug(f"[{thread_name}] Querying Ollama for available models...")
+
+        try:
+            response = requests.get(f"{self._base_url}/api/tags", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+
+            models = data.get("models", [])
+            if not models:
+                logger.debug(f"[{thread_name}] No models found in Ollama")
+                return None
+
+            # Return the first available model
+            model_name = models[0].get("name") or models[0].get("model")
+            if model_name:
+                logger.info(f"[{thread_name}] Auto-detected Ollama model: {model_name}")
+                return model_name
+
+            return None
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"[{thread_name}] Timeout querying Ollama tags")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"[{thread_name}] Connection error - is Ollama running?")
+            return None
+        except Exception as e:
+            logger.warning(f"[{thread_name}] Failed to query Ollama tags: {e}")
+            return None
 
     def check_health(self) -> bool:
-        # TODO: Check /api/tags endpoint
-        raise NotImplementedError()
+        """Check Ollama health via /api/tags endpoint."""
+        try:
+            response = requests.get(f"{self._base_url}/api/tags", timeout=5)
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def get_model_capabilities(
+        self, model: Optional[str] = None
+    ) -> Optional[ModelCapabilities]:
+        """
+        Get model capabilities from Ollama's /api/show endpoint.
+
+        Queries Ollama for model metadata including context length and
+        attention configuration (including sliding window if present).
+
+        Args:
+            model: Model to query (uses default if None)
+
+        Returns:
+            ModelCapabilities with context window info, or None if unavailable
+        """
+        model_id = model or self._default_model or self.get_running_model()
+        if not model_id:
+            return None
+
+        thread_name = threading.current_thread().name
+
+        try:
+            response = requests.post(
+                f"{self._base_url}/api/show",
+                json={"name": model_id},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            model_info = data.get("model_info", {})
+
+            # Look for context length - try various possible key patterns
+            context_length = None
+            sliding_window = None
+            rope_original = None
+
+            for key, value in model_info.items():
+                key_lower = key.lower()
+
+                # Context length (e.g., "llama.context_length", "gptoss.context_length")
+                if "context_length" in key_lower and context_length is None:
+                    if isinstance(value, (int, float)):
+                        context_length = int(value)
+
+                # Sliding window attention (e.g., "gptoss.attention.sliding_window")
+                if "sliding_window" in key_lower and sliding_window is None:
+                    if isinstance(value, (int, float)) and value > 0:
+                        sliding_window = int(value)
+
+                # RoPE scaling original context
+                if "original_context" in key_lower and rope_original is None:
+                    if isinstance(value, (int, float)):
+                        rope_original = int(value)
+
+            # Default context length if not found
+            if context_length is None:
+                context_length = 4096  # Conservative default
+
+            capabilities = ModelCapabilities(
+                model_id=model_id,
+                context_length=context_length,
+                sliding_window=sliding_window,
+                rope_scaling_original_context=rope_original,
+            )
+
+            # Log important capability info
+            if capabilities.has_sliding_window:
+                logger.warning(
+                    f"[{thread_name}] ⚠️ Model {model_id} uses sliding window attention "
+                    f"({sliding_window} tokens). Long context may not be fully visible!"
+                )
+            else:
+                logger.info(
+                    f"[{thread_name}] Model {model_id} capabilities: "
+                    f"context={context_length:,} tokens, full attention"
+                )
+
+            return capabilities
+
+        except requests.exceptions.RequestException as e:
+            logger.warning(
+                f"[{thread_name}] Failed to get model capabilities for {model_id}: {e}"
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                f"[{thread_name}] Error parsing model capabilities for {model_id}: {e}"
+            )
+            return None
 
     def supports_tools(self, model: Optional[str] = None) -> bool:
-        # TODO: Check model capabilities
-        raise NotImplementedError()
+        """
+        Detect tool support via test API call.
+
+        Uses a minimal test call with a dummy tool definition to probe support.
+        Results are cached per model.
+
+        Args:
+            model: Model to test (uses default/auto-detect if None)
+
+        Returns:
+            True if tool calls are supported
+        """
+        model_to_test = model or self._default_model or self.get_running_model()
+
+        # Use cache if same model
+        if self._tools_supported is not None and self._tools_model == model_to_test:
+            return self._tools_supported
+
+        if not model_to_test:
+            return False
+
+        thread_name = threading.current_thread().name
+        logger.info(
+            f"[{thread_name}] Detecting tool support for Ollama model {model_to_test}"
+        )
+
+        try:
+            test_tool = {
+                "type": "function",
+                "function": {
+                    "name": "test_tool_support",
+                    "description": "Test function to detect tool support",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            }
+
+            payload = {
+                "model": model_to_test,
+                "messages": [{"role": "user", "content": "test"}],
+                "tools": [test_tool],
+                "stream": False,
+            }
+
+            response = requests.post(
+                f"{self._base_url}/api/chat",
+                json=payload,
+                timeout=30,
+            )
+            response.raise_for_status()
+
+            # If we get here without error, tools are likely supported
+            self._tools_supported = True
+            self._tools_model = model_to_test
+            logger.info(f"[{thread_name}] Tool calls SUPPORTED for {model_to_test}")
+            return True
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if any(
+                indicator in error_msg
+                for indicator in [
+                    "tools",
+                    "function",
+                    "not supported",
+                    "invalid",
+                    "unknown",
+                ]
+            ):
+                logger.info(f"[{thread_name}] Tool calls NOT supported: {e}")
+            else:
+                logger.warning(f"[{thread_name}] Tool detection failed: {e}")
+
+            self._tools_supported = False
+            self._tools_model = model_to_test
+            return False
+
+    def _convert_tool_calls_to_openai_format(
+        self, tool_calls: list[dict]
+    ) -> list[dict]:
+        """
+        Convert Ollama tool calls to OpenAI format.
+
+        Ollama returns tool_calls with arguments as parsed objects,
+        while OpenAI format expects arguments as JSON strings.
+        """
+        import json
+
+        converted = []
+        for i, tc in enumerate(tool_calls):
+            func = tc.get("function", {})
+            arguments = func.get("arguments", {})
+
+            # Convert arguments to JSON string if it's a dict
+            if isinstance(arguments, dict):
+                arguments_str = json.dumps(arguments)
+            else:
+                arguments_str = str(arguments)
+
+            converted.append(
+                {
+                    "id": f"call_{i}",  # Ollama doesn't provide IDs, generate them
+                    "type": "function",
+                    "function": {
+                        "name": func.get("name", ""),
+                        "arguments": arguments_str,
+                    },
+                }
+            )
+
+        return converted
+
+    def _normalize_messages_for_ollama(self, messages: list[dict]) -> list[dict]:
+        """
+        Normalize messages for Ollama's native /api/chat endpoint.
+
+        Handles differences between OpenAI and Ollama message formats:
+        - Converts content: None to content: "" for assistant messages
+        - Ensures tool messages have the correct format
+        """
+        normalized = []
+        for msg in messages:
+            msg_copy = msg.copy()
+
+            # Ollama doesn't like content: None, use empty string instead
+            if msg_copy.get("content") is None:
+                msg_copy["content"] = ""
+
+            normalized.append(msg_copy)
+        return normalized
 
     def complete(
         self,
@@ -591,8 +1054,107 @@ class OllamaBackend(InferenceBackend):
         tools: Optional[list[dict]] = None,
         timeout: Optional[float] = None,
     ) -> CompletionResponse:
-        # TODO: Use /api/chat endpoint
-        raise NotImplementedError()
+        """Non-streaming completion via Ollama /api/chat endpoint."""
+        model_to_use = model or self._default_model or self.get_running_model()
+        if not model_to_use:
+            raise ValueError("No model available for inference")
+
+        # Normalize messages for Ollama's native API
+        normalized_messages = self._normalize_messages_for_ollama(messages)
+
+        payload: dict[str, Any] = {
+            "model": model_to_use,
+            "messages": normalized_messages,
+            "stream": False,
+        }
+
+        # Add options for temperature and max_tokens
+        options: dict[str, Any] = {}
+
+        effective_temp = (
+            temperature if temperature is not None else self._default_temperature
+        )
+        if effective_temp is not None:
+            options["temperature"] = effective_temp
+
+        effective_max_tokens = (
+            max_tokens if max_tokens is not None else self._default_max_tokens
+        )
+        if effective_max_tokens is not None:
+            options["num_predict"] = effective_max_tokens
+
+        if options:
+            payload["options"] = options
+
+        if tools:
+            payload["tools"] = tools
+
+        request_timeout = timeout if timeout is not None else 120
+
+        thread_name = threading.current_thread().name
+        logger.debug(f"[{thread_name}] Ollama complete request to model {model_to_use}")
+
+        try:
+            response = requests.post(
+                f"{self._base_url}/api/chat",
+                json=payload,
+                timeout=request_timeout,
+            )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError:
+            # Log the actual error response body for debugging
+            error_body = ""
+            try:
+                error_body = response.text
+            except Exception:
+                pass
+            logger.error(
+                f"[{thread_name}] Ollama /api/chat returned {response.status_code}: {error_body}"
+            )
+            # Log the payload for debugging (truncate large messages)
+            debug_payload = payload.copy()
+            if "messages" in debug_payload:
+                debug_messages = []
+                for msg in debug_payload["messages"]:
+                    msg_debug = {
+                        "role": msg.get("role"),
+                        "content_len": len(msg.get("content", "") or ""),
+                        "has_tool_calls": "tool_calls" in msg,
+                        "has_tool_call_id": "tool_call_id" in msg,
+                    }
+                    debug_messages.append(msg_debug)
+                debug_payload["messages"] = debug_messages
+            logger.error(f"[{thread_name}] Request payload summary: {debug_payload}")
+            raise
+        data = response.json()
+
+        message = data.get("message", {})
+        content = message.get("content", "")
+        done_reason = data.get("done_reason", "stop")
+
+        # Handle tool calls
+        tool_calls = None
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls:
+            tool_calls = self._convert_tool_calls_to_openai_format(raw_tool_calls)
+
+        # Build usage dict from Ollama stats
+        usage = None
+        if data.get("prompt_eval_count") or data.get("eval_count"):
+            usage = {
+                "prompt_tokens": data.get("prompt_eval_count", 0),
+                "completion_tokens": data.get("eval_count", 0),
+                "total_tokens": (
+                    data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
+                ),
+            }
+
+        return CompletionResponse(
+            content=content,
+            finish_reason=done_reason,
+            tool_calls=tool_calls,
+            usage=usage,
+        )
 
     def complete_stream(
         self,
@@ -603,8 +1165,95 @@ class OllamaBackend(InferenceBackend):
         tools: Optional[list[dict]] = None,
         timeout: Optional[float] = None,
     ) -> Iterator[CompletionChunk]:
-        # TODO: Use /api/chat with stream=True
-        raise NotImplementedError()
+        """Streaming completion via Ollama /api/chat endpoint."""
+        import json
+
+        model_to_use = model or self._default_model or self.get_running_model()
+        if not model_to_use:
+            raise ValueError("No model available for inference")
+
+        payload: dict[str, Any] = {
+            "model": model_to_use,
+            "messages": messages,
+            "stream": True,
+        }
+
+        # Add options for temperature and max_tokens
+        options: dict[str, Any] = {}
+
+        effective_temp = (
+            temperature if temperature is not None else self._default_temperature
+        )
+        if effective_temp is not None:
+            options["temperature"] = effective_temp
+
+        effective_max_tokens = (
+            max_tokens if max_tokens is not None else self._default_max_tokens
+        )
+        if effective_max_tokens is not None:
+            options["num_predict"] = effective_max_tokens
+
+        if options:
+            payload["options"] = options
+
+        if tools:
+            payload["tools"] = tools
+
+        request_timeout = timeout if timeout is not None else 120
+
+        thread_name = threading.current_thread().name
+        logger.debug(f"[{thread_name}] Ollama stream request to model {model_to_use}")
+
+        # Track accumulated tool calls across chunks
+        accumulated_tool_calls: list[dict] = []
+
+        with requests.post(
+            f"{self._base_url}/api/chat",
+            json=payload,
+            timeout=request_timeout,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                message = data.get("message", {})
+                content = message.get("content", "")
+                done = data.get("done", False)
+                done_reason = data.get("done_reason")
+
+                # Accumulate tool calls if present
+                raw_tool_calls = message.get("tool_calls")
+                if raw_tool_calls:
+                    accumulated_tool_calls.extend(raw_tool_calls)
+
+                # Determine finish reason
+                finish_reason = None
+                if done:
+                    if accumulated_tool_calls:
+                        finish_reason = "tool_calls"
+                    else:
+                        finish_reason = done_reason or "stop"
+
+                # Only include tool_calls on final chunk
+                chunk_tool_calls = None
+                if done and accumulated_tool_calls:
+                    chunk_tool_calls = self._convert_tool_calls_to_openai_format(
+                        accumulated_tool_calls
+                    )
+
+                yield CompletionChunk(
+                    content=content,
+                    finish_reason=finish_reason,
+                    tool_calls=chunk_tool_calls,
+                )
 
 
 @dataclass
@@ -723,6 +1372,39 @@ class InferenceClient:
         if self._backend is None:
             return False
         return self._backend.supports_tools(model)
+
+    def get_model_capabilities(
+        self, model: Optional[str] = None
+    ) -> Optional[ModelCapabilities]:
+        """
+        Get context window and attention capabilities for a model.
+
+        Args:
+            model: Model to query (uses default if None)
+
+        Returns:
+            ModelCapabilities with context window info, or None if unavailable
+        """
+        if self._backend is None:
+            return None
+        return self._backend.get_model_capabilities(model)
+
+    def validate_context(
+        self, messages: list[dict], model: Optional[str] = None
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Validate that messages fit within the model's context window.
+
+        Args:
+            messages: List of message dicts to validate
+            model: Model to check against (uses default if None)
+
+        Returns:
+            Tuple of (fits: bool, warning_message: Optional[str])
+        """
+        if self._backend is None:
+            return (True, None)
+        return self._backend.validate_context(messages, model)
 
     def complete(
         self,

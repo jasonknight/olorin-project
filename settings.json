@@ -1,105 +1,17 @@
 {
-  "global": {
-    "log_level": "INFO"
-  },
-  "state": {
-    "db_path": "./data/state.db"
-  },
-  "inference": {
-    "backend": "exo",
-    "timeout": 120,
-    "retry_count": 3,
-    "retry_delay": 1.0
-  },
-  "kafka": {
-    "bootstrap_servers": "localhost:9092",
-    "send_timeout": 10,
-    "max_retries": 3
-  },
-  "exo": {
-    "base_url": "http://localhost:52415/v1",
-    "api_key": "dummy-key",
-    "model_name": null,
-    "temperature": 0.7,
-    "max_tokens": null
-  },
-  "ollama": {
-    "base_url": "http://localhost:11434",
-    "model_name": null,
-    "temperature": 0.7,
-    "max_tokens": null
-  },
   "broca": {
-    "kafka_topic": "ai_out",
-    "consumer_group": "tts-consumer-group",
     "auto_offset_reset": "earliest",
+    "consumer_group": "tts-consumer-group",
+    "kafka_topic": "ai_out",
     "tts": {
       "model_name": "tts_models/en/vctk/vits",
-      "speaker": "p272",
-      "output_dir": "output"
+      "output_dir": "output",
+      "speaker": "p272"
     }
   },
-  "cortex": {
-    "input_topic": "prompts",
-    "output_topic": "ai_out",
-    "consumer_group": "exo-consumer-group",
-    "auto_offset_reset": "earliest"
-  },
-  "hippocampus": {
-    "input_dir": "~/Documents/AI_IN",
-    "trackers": {
-      "ollama": {
-        "enabled": true,
-        "model": "llama3.2:1b",
-        "threshold": 0.5,
-        "paths": [
-          "ollama",
-          "/usr/local/bin/ollama",
-          "/opt/homebrew/bin/ollama",
-          "/Applications/Ollama.app/Contents/Resources/ollama"
-        ]
-      },
-      "min_content_chars": 100,
-      "min_content_density": 0.3,
-      "min_word_count": 20,
-      "notify_broca": true
-    },
-    "chromadb": {
-      "host": "localhost",
-      "port": 8000,
-      "collection": "documents"
-    },
-    "chunking": {
-      "size": 4000,
-      "overlap": 400,
-      "min_size": 200
-    },
-    "poll_interval": 5,
-    "tracking_db": "./hippocampus/data/tracking.db",
-    "pdf_tracking_db": "./hippocampus/data/pdf_tracking.db",
-    "ebook_tracking_db": "./hippocampus/data/ebook_tracking.db",
-    "txt_tracking_db": "./hippocampus/data/txt_tracking.db",
-    "office_tracking_db": "./hippocampus/data/office_tracking.db",
-    "context_db": "./hippocampus/data/context.db",
-    "reprocess_on_change": true,
-    "delete_after_processing": false,
-    "log_file": "./data/ingest.log"
-  },
-  "enrichener": {
-    "input_topic": "ai_in",
-    "output_topic": "prompts",
-    "consumer_group": "enrichener-consumer-group",
-    "auto_offset_reset": "earliest",
-    "thread_pool_size": 3,
-    "llm_timeout_seconds": 120,
-    "decision_temperature": 0.1,
-    "chromadb_query_n_results": 10,
-    "context_db_path": "./hippocampus/data/context.db",
-    "cleanup_context_after_use": false
-  },
   "chat": {
-    "history_enabled": true,
     "db_path": "./cortex/data/chat.db",
+    "history_enabled": true,
     "reset_patterns": [
       "/reset",
       "reset conversation",
@@ -111,25 +23,113 @@
   "control": {
     "api": {
       "enabled": true,
-      "port": 8765,
-      "host": "0.0.0.0"
+      "host": "0.0.0.0",
+      "port": 8765
     }
   },
-  "tools": {
-    "write": {
-      "enabled": true,
-      "port": 8770
+  "cortex": {
+    "auto_offset_reset": "earliest",
+    "consumer_group": "exo-consumer-group",
+    "input_topic": "prompts",
+    "output_topic": "ai_out"
+  },
+  "enrichener": {
+    "auto_offset_reset": "earliest",
+    "chromadb_query_n_results": 10,
+    "cleanup_context_after_use": false,
+    "consumer_group": "enrichener-consumer-group",
+    "context_db_path": "./hippocampus/data/context.db",
+    "decision_temperature": 0.1,
+    "input_topic": "ai_in",
+    "llm_timeout_seconds": 120,
+    "output_topic": "prompts",
+    "thread_pool_size": 3
+  },
+  "exo": {
+    "api_key": "dummy-key",
+    "base_url": "http://localhost:52415/v1",
+    "max_tokens": null,
+    "model_name": null,
+    "temperature": 0.7
+  },
+  "global": {
+    "log_level": "INFO"
+  },
+  "hippocampus": {
+    "chromadb": {
+      "collection": "documents",
+      "host": "localhost",
+      "port": 8000
     },
+    "chunking": {
+      "min_size": 200,
+      "overlap": 400,
+      "size": 4000
+    },
+    "context_db": "./hippocampus/data/context.db",
+    "delete_after_processing": false,
+    "ebook_tracking_db": "./hippocampus/data/ebook_tracking.db",
+    "input_dir": "~/Documents/AI_IN",
+    "log_file": "./data/ingest.log",
+    "office_tracking_db": "./hippocampus/data/office_tracking.db",
+    "pdf_tracking_db": "./hippocampus/data/pdf_tracking.db",
+    "poll_interval": 5,
+    "reprocess_on_change": true,
+    "trackers": {
+      "min_content_chars": 100,
+      "min_content_density": 0.3,
+      "min_word_count": 20,
+      "notify_broca": true,
+      "ollama": {
+        "enabled": true,
+        "model": "llama3.2:1b",
+        "paths": [
+          "ollama",
+          "/usr/local/bin/ollama",
+          "/opt/homebrew/bin/ollama",
+          "/Applications/Ollama.app/Contents/Resources/ollama"
+        ],
+        "threshold": 0.5
+      }
+    },
+    "tracking_db": "./hippocampus/data/tracking.db",
+    "txt_tracking_db": "./hippocampus/data/txt_tracking.db"
+  },
+  "inference": {
+    "backend": "ollama",
+    "retry_count": 3,
+    "retry_delay": 1.0,
+    "timeout": 120
+  },
+  "kafka": {
+    "bootstrap_servers": "localhost:9092",
+    "max_retries": 3,
+    "send_timeout": 10
+  },
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "max_tokens": null,
+    "model_name": "deepseek-r1:70b",
+    "temperature": 0.7
+  },
+  "state": {
+    "db_path": "./data/state.db"
+  },
+  "tools": {
     "embeddings": {
-      "enabled": true,
-      "port": 8771,
-      "model": "nomic-ai/nomic-embed-text-v1.5",
       "document_prefix": "search_document: ",
+      "enabled": true,
+      "model": "nomic-ai/nomic-embed-text-v1.5",
+      "port": 8771,
       "query_prefix": "search_query: "
     },
     "search": {
       "enabled": true,
       "port": 8772
+    },
+    "write": {
+      "enabled": true,
+      "port": 8770
     }
   }
 }
