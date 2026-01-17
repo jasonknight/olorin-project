@@ -1,6 +1,6 @@
 //! Setting definitions for all configuration tabs
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Input type for a setting
 #[derive(Debug, Clone, PartialEq)]

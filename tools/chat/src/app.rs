@@ -52,6 +52,32 @@ pub enum SearchFocus {
     Results,
 }
 
+/// Search mode: semantic (embeddings) or source (filename match)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchMode {
+    #[default]
+    Semantic,
+    Source,
+}
+
+impl SearchMode {
+    /// Get display name for the mode
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SearchMode::Semantic => "Semantic",
+            SearchMode::Source => "Source",
+        }
+    }
+
+    /// Toggle to the other mode
+    pub fn toggle(&self) -> Self {
+        match self {
+            SearchMode::Semantic => SearchMode::Source,
+            SearchMode::Source => SearchMode::Semantic,
+        }
+    }
+}
+
 /// State for the search tab
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
@@ -67,6 +93,8 @@ pub struct SearchState {
     pub showing_help: bool,
     /// Current focus (input or results)
     pub focus: SearchFocus,
+    /// Search mode (semantic or source)
+    pub mode: SearchMode,
     /// Loading state
     pub is_loading: bool,
     /// Error message if any
@@ -714,7 +742,11 @@ impl<'a> App<'a> {
 
         self.search_state.is_loading = true;
         self.search_state.error = None;
-        self.status = String::from("Searching...");
+        let mode_str = match self.search_state.mode {
+            SearchMode::Semantic => "semantic",
+            SearchMode::Source => "source",
+        };
+        self.status = format!("Searching ({})...", mode_str);
 
         let url = format!("{}/call", self.search_tool_url);
         let client = reqwest::Client::new();
@@ -723,6 +755,7 @@ impl<'a> App<'a> {
             .post(&url)
             .json(&serde_json::json!({
                 "query": query,
+                "mode": mode_str,
                 "per_page": 50
             }))
             .timeout(std::time::Duration::from_secs(30))
@@ -974,6 +1007,12 @@ impl<'a> App<'a> {
     #[allow(dead_code)]
     pub fn search_clear_query(&mut self) {
         self.search_state.query.clear();
+    }
+
+    /// Toggle the search mode between semantic and source
+    pub fn toggle_search_mode(&mut self) {
+        self.search_state.mode = self.search_state.mode.toggle();
+        self.status = format!("Search mode: {}", self.search_state.mode.as_str());
     }
 
     /// Get the currently selected search result

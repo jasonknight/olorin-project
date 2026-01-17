@@ -2,13 +2,13 @@
 
 use crate::app::{App, Focus};
 use crate::ui::inputs;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
+use ratatui::Frame;
 
 /// Render the form with settings
 pub fn render_form(frame: &mut Frame, app: &App, area: Rect) {
@@ -75,15 +75,8 @@ fn render_search_form(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let search_spans = if is_search_focused {
-        let query = &app.search_query;
-        let cursor_pos = app.search_cursor_pos.min(query.len());
-        let before = &query[..cursor_pos];
-        let cursor_char = query.chars().nth(cursor_pos).unwrap_or(' ');
-        let after = if cursor_pos < query.len() {
-            &query[cursor_pos + cursor_char.len_utf8()..]
-        } else {
-            ""
-        };
+        // Use UTF-8 safe cursor splitting
+        let (before, cursor_char, after) = app.split_search_at_cursor();
 
         vec![
             Span::styled(

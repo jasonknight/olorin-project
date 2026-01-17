@@ -5,11 +5,11 @@ mod inputs;
 mod tabs;
 
 use crate::app::App;
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 /// Main render function
 pub fn render(frame: &mut Frame, app: &mut App) {

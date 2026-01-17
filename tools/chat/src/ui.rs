@@ -228,8 +228,13 @@ fn render_search_display(frame: &mut Frame, app: &App, area: Rect) {
         Color::DarkGray
     };
 
+    let mode_str = app.search_state.mode.as_str();
+    let input_title = format!(
+        " Search Query [{}] (Tab: focus, Enter: search, F2: mode) ",
+        mode_str
+    );
     let input_block = Block::default()
-        .title(" Search Query (Tab to focus, Enter to search) ")
+        .title(input_title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(input_border_color));
 
@@ -601,17 +606,30 @@ fn render_search_help_modal(frame: &mut Frame) {
     let dim_style = Style::default().fg(Color::DarkGray);
 
     let help_lines: Vec<Line> = vec![
+        Line::from(Span::styled("SEARCH MODES", header_style)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Press ", text_style),
+            Span::styled("F2", key_style),
+            Span::styled(" to toggle between search modes:", text_style),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Semantic  ", key_style),
+            Span::styled("Finds documents by meaning using embeddings", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Source    ", key_style),
+            Span::styled("Finds documents by filename/path substring", text_style),
+        ]),
+        Line::from(""),
         Line::from(Span::styled("SEMANTIC SEARCH", header_style)),
         Line::from(""),
         Line::from(vec![
-            Span::styled("The search system uses ", text_style),
+            Span::styled("Uses ", text_style),
             Span::styled("semantic embeddings", key_style),
-            Span::styled(" to find documents by meaning,", text_style),
+            Span::styled(" to find documents by meaning:", text_style),
         ]),
-        Line::from(Span::styled(
-            "not just keyword matching. This means:",
-            text_style,
-        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("  • ", dim_style),
@@ -651,6 +669,10 @@ fn render_search_help_modal(frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled("KEYBOARD SHORTCUTS", header_style)),
         Line::from(""),
+        Line::from(vec![
+            Span::styled("  F2    ", key_style),
+            Span::styled("Toggle search mode (Semantic/Source)", text_style),
+        ]),
         Line::from(vec![
             Span::styled("  Tab       ", key_style),
             Span::styled("Switch between search input and results", text_style),

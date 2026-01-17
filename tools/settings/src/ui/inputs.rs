@@ -2,11 +2,11 @@
 
 use crate::app::SettingValue;
 use crate::settings::InputType;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 /// Render an input field based on its type
 pub fn render_input(frame: &mut Frame, setting: &SettingValue, area: Rect, is_focused: bool) {
@@ -53,10 +53,15 @@ fn render_text_input(frame: &mut Frame, setting: &SettingValue, area: Rect, is_f
         setting.input_buffer.clone()
     };
 
-    // Truncate if too long
+    // Truncate if too long (by character count, not bytes)
     let max_len = area.width.saturating_sub(2) as usize;
-    let truncated = if display_text.len() > max_len {
-        format!("{}…", &display_text[..max_len.saturating_sub(1)])
+    let char_count = display_text.chars().count();
+    let truncated = if char_count > max_len {
+        let truncated_str: String = display_text
+            .chars()
+            .take(max_len.saturating_sub(1))
+            .collect();
+        format!("{}…", truncated_str)
     } else {
         display_text
     };
@@ -64,17 +69,8 @@ fn render_text_input(frame: &mut Frame, setting: &SettingValue, area: Rect, is_f
     let mut spans = vec![];
 
     if is_focused && setting.is_editing {
-        // Show cursor
-        let text = &setting.input_buffer;
-        let cursor_pos = setting.cursor_pos.min(text.len());
-
-        let before = &text[..cursor_pos];
-        let cursor_char = text.chars().nth(cursor_pos).unwrap_or(' ');
-        let after = if cursor_pos < text.len() {
-            &text[cursor_pos + cursor_char.len_utf8()..]
-        } else {
-            ""
-        };
+        // Show cursor using UTF-8 safe method
+        let (before, cursor_char, after) = setting.split_at_cursor();
 
         spans.push(Span::styled(
             format!("[{}", before),
@@ -185,17 +181,8 @@ fn render_number_input(frame: &mut Frame, setting: &SettingValue, area: Rect, is
     let mut spans = vec![];
 
     if is_focused && setting.is_editing {
-        // Show cursor
-        let text = &setting.input_buffer;
-        let cursor_pos = setting.cursor_pos.min(text.len());
-
-        let before = &text[..cursor_pos];
-        let cursor_char = text.chars().nth(cursor_pos).unwrap_or(' ');
-        let after = if cursor_pos < text.len() {
-            &text[cursor_pos + cursor_char.len_utf8()..]
-        } else {
-            ""
-        };
+        // Show cursor using UTF-8 safe method
+        let (before, cursor_char, after) = setting.split_at_cursor();
 
         spans.push(Span::styled(
             format!("[{}", before),

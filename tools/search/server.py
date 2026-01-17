@@ -210,13 +210,19 @@ def describe():
     return jsonify(
         {
             "name": "search",
-            "description": "Search the ChromaDB knowledge base using semantic similarity. Returns paginated results with relevance scores.",
+            "description": "Search the ChromaDB knowledge base using semantic similarity or source path matching. Returns paginated results.",
             "parameters": [
                 {
                     "name": "query",
                     "type": "string",
                     "required": True,
                     "description": "Search query text",
+                },
+                {
+                    "name": "mode",
+                    "type": "string",
+                    "required": False,
+                    "description": "Search mode: 'semantic' (default) for embedding-based similarity, 'source' for filename/path substring match",
                 },
                 {
                     "name": "page",
@@ -240,7 +246,7 @@ def describe():
                     "name": "include_distances",
                     "type": "boolean",
                     "required": False,
-                    "description": "Include similarity distances in results (default: true)",
+                    "description": "Include similarity distances in results (default: true, only applies to semantic mode)",
                 },
             ],
         }
@@ -330,6 +336,10 @@ def call():
         if not isinstance(include_distances, bool):
             include_distances = True
 
+        mode = data.get("mode", "semantic")
+        if mode not in ("semantic", "source"):
+            mode = "semantic"
+
         # Get collection
         try:
             collection = client.get_collection(name=collection_name)
@@ -372,6 +382,7 @@ def call():
                     "success": True,
                     "result": {
                         "query": query,
+                        "mode": mode,
                         "total_results": 0,
                         "total_pages": 0,
                         "page": page,
@@ -381,6 +392,56 @@ def call():
                 }
             )
 
+        # Handle source search mode (substring match on source field)
+        if mode == "source":
+            # Get all documents with metadata
+            all_docs = collection.get(include=["documents", "metadatas"])
+
+            ids = all_docs.get("ids", [])
+            documents = all_docs.get("documents", [])
+            metadatas = all_docs.get("metadatas", [])
+
+            # Filter by source containing query (case-insensitive)
+            query_lower = query.lower()
+            filtered_results = []
+            for doc_id, doc_text, metadata in zip(ids, documents, metadatas):
+                source = metadata.get("source", "") if metadata else ""
+                if source and query_lower in source.lower():
+                    filtered_results.append(
+                        {
+                            "id": doc_id,
+                            "text": doc_text,
+                            "metadata": metadata,
+                        }
+                    )
+
+            # Calculate pagination for filtered results
+            filtered_total = len(filtered_results)
+            total_pages = (
+                math.ceil(filtered_total / per_page) if filtered_total > 0 else 0
+            )
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+
+            # Slice to get just the requested page
+            page_results = filtered_results[start_idx:end_idx]
+
+            return jsonify(
+                {
+                    "success": True,
+                    "result": {
+                        "query": query,
+                        "mode": mode,
+                        "total_results": filtered_total,
+                        "total_pages": total_pages,
+                        "page": page,
+                        "per_page": per_page,
+                        "results": page_results,
+                    },
+                }
+            )
+
+        # Semantic search mode (default)
         # Get query embedding
         query_embedding = get_embedding(query)
         if query_embedding is None:
@@ -427,8 +488,8 @@ def call():
 
         # Build result list
         result_list = []
-        for i, (doc_id, doc_text, metadata, distance) in enumerate(
-            zip(page_ids, page_documents, page_metadatas, page_distances)
+        for doc_id, doc_text, metadata, distance in zip(
+            page_ids, page_documents, page_metadatas, page_distances
         ):
             result_item = {
                 "id": doc_id,
@@ -444,6 +505,7 @@ def call():
                 "success": True,
                 "result": {
                     "query": query,
+                    "mode": mode,
                     "total_results": total_results,
                     "total_pages": total_pages,
                     "page": page,

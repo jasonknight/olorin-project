@@ -1,11 +1,11 @@
 //! Tab bar rendering
 
 use crate::app::App;
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 /// Render the tab bar at the top
 pub fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {

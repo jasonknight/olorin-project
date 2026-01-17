@@ -1,7 +1,8 @@
 //! Application state and logic
 
 use crate::api;
-use crate::settings::{DynamicSource, InputType, SettingDef, TabDef, create_tab_definitions};
+use crate::settings::{create_tab_definitions, DynamicSource, InputType, SettingDef, TabDef};
+use crate::validation::{validate_and_convert, ValidationResult};
 use anyhow::Result;
 use serde_json::Value;
 use std::fs;
@@ -53,10 +54,13 @@ impl SettingValue {
             _ => 0,
         };
 
+        // cursor_pos is now a CHARACTER index, not byte index
+        let cursor_char_count = input_buffer.chars().count();
+
         Self {
             def,
             current_value: value,
-            cursor_pos: input_buffer.len(),
+            cursor_pos: cursor_char_count,
             input_buffer,
             select_index,
             dynamic_options: Vec::new(),
@@ -77,6 +81,109 @@ impl SettingValue {
             }
             InputType::Toggle => vec!["true".into(), "false".into()],
             _ => vec![],
+        }
+    }
+
+    /// Get the character count of the input buffer
+    pub fn char_count(&self) -> usize {
+        self.input_buffer.chars().count()
+    }
+
+    /// Convert character index to byte index for slicing
+    fn char_to_byte_idx(&self, char_idx: usize) -> usize {
+        self.input_buffer
+            .char_indices()
+            .nth(char_idx)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(self.input_buffer.len())
+    }
+
+    /// Split text at cursor for rendering
+    /// Returns (before_cursor, cursor_char, after_cursor)
+    pub fn split_at_cursor(&self) -> (&str, char, &str) {
+        let char_count = self.char_count();
+        let cursor_pos = self.cursor_pos.min(char_count);
+        let byte_idx = self.char_to_byte_idx(cursor_pos);
+
+        let before = &self.input_buffer[..byte_idx];
+
+        if cursor_pos < char_count {
+            let cursor_char = self.input_buffer[byte_idx..].chars().next().unwrap();
+            let after_byte_idx = byte_idx + cursor_char.len_utf8();
+            let after = &self.input_buffer[after_byte_idx..];
+            (before, cursor_char, after)
+        } else {
+            (before, ' ', "")
+        }
+    }
+
+    /// Insert a character at the cursor position (UTF-8 safe)
+    pub fn insert_char_at_cursor(&mut self, c: char) {
+        let byte_idx = self.char_to_byte_idx(self.cursor_pos);
+        self.input_buffer.insert(byte_idx, c);
+        self.cursor_pos += 1;
+    }
+
+    /// Delete character before cursor (backspace) - UTF-8 safe
+    /// Returns true if a character was deleted
+    pub fn delete_char_before_cursor(&mut self) -> bool {
+        if self.cursor_pos > 0 {
+            self.cursor_pos -= 1;
+            let byte_idx = self.char_to_byte_idx(self.cursor_pos);
+            if let Some(c) = self.input_buffer[byte_idx..].chars().next() {
+                self.input_buffer
+                    .replace_range(byte_idx..byte_idx + c.len_utf8(), "");
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Delete character at cursor (delete forward) - UTF-8 safe
+    /// Returns true if a character was deleted
+    pub fn delete_char_at_cursor(&mut self) -> bool {
+        let char_count = self.char_count();
+        if self.cursor_pos < char_count {
+            let byte_idx = self.char_to_byte_idx(self.cursor_pos);
+            if let Some(c) = self.input_buffer[byte_idx..].chars().next() {
+                self.input_buffer
+                    .replace_range(byte_idx..byte_idx + c.len_utf8(), "");
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Move cursor left by one character
+    pub fn move_cursor_left(&mut self) {
+        self.cursor_pos = self.cursor_pos.saturating_sub(1);
+    }
+
+    /// Move cursor right by one character
+    pub fn move_cursor_right(&mut self) {
+        let char_count = self.char_count();
+        if self.cursor_pos < char_count {
+            self.cursor_pos += 1;
+        }
+    }
+
+    /// Move cursor to start of text
+    pub fn cursor_to_start(&mut self) {
+        self.cursor_pos = 0;
+    }
+
+    /// Move cursor to end of text
+    pub fn cursor_to_end(&mut self) {
+        self.cursor_pos = self.char_count();
+    }
+
+    /// Check if a character is valid for numeric input at current position
+    pub fn is_valid_numeric_char(&self, c: char, allow_float: bool) -> bool {
+        match c {
+            '0'..='9' => true,
+            '-' => self.cursor_pos == 0 && !self.input_buffer.contains('-'),
+            '.' if allow_float => !self.input_buffer.contains('.'),
+            _ => false,
         }
     }
 }
@@ -250,18 +357,55 @@ impl App {
         })
     }
 
-    /// Insert character into search query
+    /// Convert character index to byte index for search query
+    fn search_char_to_byte_idx(&self, char_idx: usize) -> usize {
+        self.search_query
+            .char_indices()
+            .nth(char_idx)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(self.search_query.len())
+    }
+
+    /// Get character count of search query
+    fn search_char_count(&self) -> usize {
+        self.search_query.chars().count()
+    }
+
+    /// Split search query at cursor for rendering (UTF-8 safe)
+    pub fn split_search_at_cursor(&self) -> (&str, char, &str) {
+        let char_count = self.search_char_count();
+        let cursor_pos = self.search_cursor_pos.min(char_count);
+        let byte_idx = self.search_char_to_byte_idx(cursor_pos);
+
+        let before = &self.search_query[..byte_idx];
+
+        if cursor_pos < char_count {
+            let cursor_char = self.search_query[byte_idx..].chars().next().unwrap();
+            let after_byte_idx = byte_idx + cursor_char.len_utf8();
+            let after = &self.search_query[after_byte_idx..];
+            (before, cursor_char, after)
+        } else {
+            (before, ' ', "")
+        }
+    }
+
+    /// Insert character into search query (UTF-8 safe)
     pub fn search_insert_char(&mut self, c: char) {
-        self.search_query.insert(self.search_cursor_pos, c);
+        let byte_idx = self.search_char_to_byte_idx(self.search_cursor_pos);
+        self.search_query.insert(byte_idx, c);
         self.search_cursor_pos += 1;
         self.perform_search();
     }
 
-    /// Delete character from search query
+    /// Delete character from search query (UTF-8 safe)
     pub fn search_delete_char(&mut self) {
         if self.search_cursor_pos > 0 {
             self.search_cursor_pos -= 1;
-            self.search_query.remove(self.search_cursor_pos);
+            let byte_idx = self.search_char_to_byte_idx(self.search_cursor_pos);
+            if let Some(c) = self.search_query[byte_idx..].chars().next() {
+                self.search_query
+                    .replace_range(byte_idx..byte_idx + c.len_utf8(), "");
+            }
             self.perform_search();
         }
     }
@@ -273,7 +417,20 @@ impl App {
 
     /// Move search cursor right
     pub fn search_cursor_right(&mut self) {
-        self.search_cursor_pos = (self.search_cursor_pos + 1).min(self.search_query.len());
+        let char_count = self.search_char_count();
+        if self.search_cursor_pos < char_count {
+            self.search_cursor_pos += 1;
+        }
+    }
+
+    /// Move search cursor to start
+    pub fn search_cursor_to_start(&mut self) {
+        self.search_cursor_pos = 0;
+    }
+
+    /// Move search cursor to end
+    pub fn search_cursor_to_end(&mut self) {
+        self.search_cursor_pos = self.search_char_count();
     }
 
     /// Ensure selected search result is visible
@@ -364,7 +521,7 @@ impl App {
         self.save_search_result_field();
     }
 
-    /// Insert character into search result text input
+    /// Insert character into search result text input (UTF-8 safe)
     pub fn search_result_insert_char(&mut self, c: char) {
         let Some(result) = self.search_results.get(self.search_selected).cloned() else {
             return;
@@ -378,30 +535,20 @@ impl App {
             // Validate character for numeric inputs
             let valid = match &setting.def.input_type {
                 InputType::IntNumber { .. } | InputType::NullableInt { .. } => {
-                    c.is_ascii_digit()
-                        || (c == '-'
-                            && setting.cursor_pos == 0
-                            && !setting.input_buffer.contains('-'))
+                    setting.is_valid_numeric_char(c, false)
                 }
-                InputType::FloatNumber { .. } => {
-                    c.is_ascii_digit()
-                        || (c == '-'
-                            && setting.cursor_pos == 0
-                            && !setting.input_buffer.contains('-'))
-                        || (c == '.' && !setting.input_buffer.contains('.'))
-                }
+                InputType::FloatNumber { .. } => setting.is_valid_numeric_char(c, true),
                 _ => true,
             };
 
             if valid {
-                setting.input_buffer.insert(setting.cursor_pos, c);
-                setting.cursor_pos += 1;
+                setting.insert_char_at_cursor(c);
                 setting.is_editing = true;
             }
         }
     }
 
-    /// Delete character from search result (backspace)
+    /// Delete character from search result (backspace) - UTF-8 safe
     pub fn search_result_delete_char(&mut self) {
         let Some(result) = self.search_results.get(self.search_selected).cloned() else {
             return;
@@ -412,15 +559,13 @@ impl App {
             .get_mut(result.tab_idx)
             .and_then(|tab| tab.get_mut(result.field_idx))
         {
-            if setting.cursor_pos > 0 {
-                setting.cursor_pos -= 1;
-                setting.input_buffer.remove(setting.cursor_pos);
+            if setting.delete_char_before_cursor() {
                 setting.is_editing = true;
             }
         }
     }
 
-    /// Delete character forward from search result
+    /// Delete character forward from search result - UTF-8 safe
     pub fn search_result_delete_char_forward(&mut self) {
         let Some(result) = self.search_results.get(self.search_selected).cloned() else {
             return;
@@ -431,8 +576,7 @@ impl App {
             .get_mut(result.tab_idx)
             .and_then(|tab| tab.get_mut(result.field_idx))
         {
-            if setting.cursor_pos < setting.input_buffer.len() {
-                setting.input_buffer.remove(setting.cursor_pos);
+            if setting.delete_char_at_cursor() {
                 setting.is_editing = true;
             }
         }
@@ -449,7 +593,7 @@ impl App {
             .get_mut(result.tab_idx)
             .and_then(|tab| tab.get_mut(result.field_idx))
         {
-            setting.cursor_pos = setting.cursor_pos.saturating_sub(1);
+            setting.move_cursor_left();
         }
     }
 
@@ -464,7 +608,37 @@ impl App {
             .get_mut(result.tab_idx)
             .and_then(|tab| tab.get_mut(result.field_idx))
         {
-            setting.cursor_pos = (setting.cursor_pos + 1).min(setting.input_buffer.len());
+            setting.move_cursor_right();
+        }
+    }
+
+    /// Move cursor to start in search result text input
+    pub fn search_result_cursor_to_start(&mut self) {
+        let Some(result) = self.search_results.get(self.search_selected).cloned() else {
+            return;
+        };
+
+        if let Some(setting) = self
+            .values
+            .get_mut(result.tab_idx)
+            .and_then(|tab| tab.get_mut(result.field_idx))
+        {
+            setting.cursor_to_start();
+        }
+    }
+
+    /// Move cursor to end in search result text input
+    pub fn search_result_cursor_to_end(&mut self) {
+        let Some(result) = self.search_results.get(self.search_selected).cloned() else {
+            return;
+        };
+
+        if let Some(setting) = self
+            .values
+            .get_mut(result.tab_idx)
+            .and_then(|tab| tab.get_mut(result.field_idx))
+        {
+            setting.cursor_to_end();
         }
     }
 
@@ -506,147 +680,20 @@ impl App {
                 return;
             };
 
-            // Convert input buffer to proper JSON value
-            let result = match &setting.def.input_type {
-                InputType::Text => Some(Value::String(setting.input_buffer.clone())),
-                InputType::Textarea => {
-                    let lines: Vec<Value> = setting
-                        .input_buffer
-                        .lines()
-                        .map(|l| Value::String(l.to_string()))
-                        .collect();
-                    Some(Value::Array(lines))
+            // Use shared validation logic
+            match validate_and_convert(&setting.input_buffer, &setting.def.input_type) {
+                ValidationResult::Valid(value) => {
+                    setting.validation_error = None;
+                    key = setting.def.key.to_string();
+                    label = setting.def.label.to_string();
+                    new_value = value;
+                    setting.current_value = new_value.clone();
                 }
-                InputType::Select(_) | InputType::DynamicSelect(_) => {
-                    Some(Value::String(setting.input_buffer.clone()))
+                ValidationResult::Invalid(err) => {
+                    setting.validation_error = Some(err);
+                    return;
                 }
-                InputType::IntNumber { min, max } => {
-                    if let Ok(n) = setting.input_buffer.parse::<i64>() {
-                        if let Some(min_val) = min {
-                            if n < *min_val {
-                                setting.validation_error = Some(format!("Min: {}", min_val));
-                                None
-                            } else if let Some(max_val) = max {
-                                if n > *max_val {
-                                    setting.validation_error = Some(format!("Max: {}", max_val));
-                                    None
-                                } else {
-                                    setting.validation_error = None;
-                                    Some(Value::Number(n.into()))
-                                }
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else if let Some(max_val) = max {
-                            if n > *max_val {
-                                setting.validation_error = Some(format!("Max: {}", max_val));
-                                None
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else {
-                            setting.validation_error = None;
-                            Some(Value::Number(n.into()))
-                        }
-                    } else {
-                        setting.validation_error = Some("Invalid number".into());
-                        None
-                    }
-                }
-                InputType::FloatNumber { min, max } => {
-                    if let Ok(n) = setting.input_buffer.parse::<f64>() {
-                        if let Some(min_val) = min {
-                            if n < *min_val {
-                                setting.validation_error = Some(format!("Min: {:.1}", min_val));
-                                None
-                            } else if let Some(max_val) = max {
-                                if n > *max_val {
-                                    setting.validation_error = Some(format!("Max: {:.1}", max_val));
-                                    None
-                                } else {
-                                    setting.validation_error = None;
-                                    serde_json::Number::from_f64(n).map(Value::Number)
-                                }
-                            } else {
-                                setting.validation_error = None;
-                                serde_json::Number::from_f64(n).map(Value::Number)
-                            }
-                        } else if let Some(max_val) = max {
-                            if n > *max_val {
-                                setting.validation_error = Some(format!("Max: {:.1}", max_val));
-                                None
-                            } else {
-                                setting.validation_error = None;
-                                serde_json::Number::from_f64(n).map(Value::Number)
-                            }
-                        } else {
-                            setting.validation_error = None;
-                            serde_json::Number::from_f64(n).map(Value::Number)
-                        }
-                    } else {
-                        setting.validation_error = Some("Invalid number".into());
-                        None
-                    }
-                }
-                InputType::Toggle => Some(Value::Bool(setting.input_buffer == "true")),
-                InputType::NullableText => {
-                    if setting.input_buffer.is_empty() {
-                        Some(Value::Null)
-                    } else {
-                        Some(Value::String(setting.input_buffer.clone()))
-                    }
-                }
-                InputType::NullableInt { min, max } => {
-                    if setting.input_buffer.is_empty() {
-                        setting.validation_error = None;
-                        Some(Value::Null)
-                    } else if let Ok(n) = setting.input_buffer.parse::<i64>() {
-                        if let Some(min_val) = min {
-                            if n < *min_val {
-                                setting.validation_error = Some(format!("Min: {}", min_val));
-                                None
-                            } else if let Some(max_val) = max {
-                                if n > *max_val {
-                                    setting.validation_error = Some(format!("Max: {}", max_val));
-                                    None
-                                } else {
-                                    setting.validation_error = None;
-                                    Some(Value::Number(n.into()))
-                                }
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else if let Some(max_val) = max {
-                            if n > *max_val {
-                                setting.validation_error = Some(format!("Max: {}", max_val));
-                                None
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else {
-                            setting.validation_error = None;
-                            Some(Value::Number(n.into()))
-                        }
-                    } else {
-                        setting.validation_error = Some("Invalid number".into());
-                        None
-                    }
-                }
-            };
-
-            // If validation failed, return early
-            let Some(value) = result else {
-                return;
-            };
-
-            key = setting.def.key.to_string();
-            label = setting.def.label.to_string();
-            new_value = value;
-            setting.current_value = new_value.clone();
+            }
         }
 
         // Save to file
@@ -735,7 +782,7 @@ impl App {
         if let Focus::FormField(idx) = self.focus {
             let setting = &mut self.values[self.current_tab][idx];
             setting.is_editing = true;
-            setting.cursor_pos = setting.input_buffer.len();
+            setting.cursor_to_end();
         }
     }
 
@@ -756,24 +803,14 @@ impl App {
             // Validate character for numeric inputs
             let valid = match &setting.def.input_type {
                 InputType::IntNumber { .. } | InputType::NullableInt { .. } => {
-                    c.is_ascii_digit()
-                        || (c == '-'
-                            && setting.cursor_pos == 0
-                            && !setting.input_buffer.contains('-'))
+                    setting.is_valid_numeric_char(c, false)
                 }
-                InputType::FloatNumber { .. } => {
-                    c.is_ascii_digit()
-                        || (c == '-'
-                            && setting.cursor_pos == 0
-                            && !setting.input_buffer.contains('-'))
-                        || (c == '.' && !setting.input_buffer.contains('.'))
-                }
+                InputType::FloatNumber { .. } => setting.is_valid_numeric_char(c, true),
                 _ => true,
             };
 
             if valid {
-                setting.input_buffer.insert(setting.cursor_pos, c);
-                setting.cursor_pos += 1;
+                setting.insert_char_at_cursor(c);
                 setting.is_editing = true;
             }
         }
@@ -782,9 +819,7 @@ impl App {
     pub fn delete_char(&mut self) {
         if let Focus::FormField(idx) = self.focus {
             let setting = &mut self.values[self.current_tab][idx];
-            if setting.cursor_pos > 0 {
-                setting.cursor_pos -= 1;
-                setting.input_buffer.remove(setting.cursor_pos);
+            if setting.delete_char_before_cursor() {
                 setting.is_editing = true;
             }
         }
@@ -793,8 +828,7 @@ impl App {
     pub fn delete_char_forward(&mut self) {
         if let Focus::FormField(idx) = self.focus {
             let setting = &mut self.values[self.current_tab][idx];
-            if setting.cursor_pos < setting.input_buffer.len() {
-                setting.input_buffer.remove(setting.cursor_pos);
+            if setting.delete_char_at_cursor() {
                 setting.is_editing = true;
             }
         }
@@ -803,14 +837,28 @@ impl App {
     pub fn move_cursor_left(&mut self) {
         if let Focus::FormField(idx) = self.focus {
             let setting = &mut self.values[self.current_tab][idx];
-            setting.cursor_pos = setting.cursor_pos.saturating_sub(1);
+            setting.move_cursor_left();
         }
     }
 
     pub fn move_cursor_right(&mut self) {
         if let Focus::FormField(idx) = self.focus {
             let setting = &mut self.values[self.current_tab][idx];
-            setting.cursor_pos = (setting.cursor_pos + 1).min(setting.input_buffer.len());
+            setting.move_cursor_right();
+        }
+    }
+
+    pub fn move_cursor_to_start(&mut self) {
+        if let Focus::FormField(idx) = self.focus {
+            let setting = &mut self.values[self.current_tab][idx];
+            setting.cursor_to_start();
+        }
+    }
+
+    pub fn move_cursor_to_end(&mut self) {
+        if let Focus::FormField(idx) = self.focus {
+            let setting = &mut self.values[self.current_tab][idx];
+            setting.cursor_to_end();
         }
     }
 
@@ -985,147 +1033,20 @@ impl App {
         {
             let setting = &mut self.values[self.current_tab][field_idx];
 
-            // Convert input buffer to proper JSON value
-            let result = match &setting.def.input_type {
-                InputType::Text => Some(Value::String(setting.input_buffer.clone())),
-                InputType::Textarea => {
-                    let lines: Vec<Value> = setting
-                        .input_buffer
-                        .lines()
-                        .map(|l| Value::String(l.to_string()))
-                        .collect();
-                    Some(Value::Array(lines))
+            // Use shared validation logic
+            match validate_and_convert(&setting.input_buffer, &setting.def.input_type) {
+                ValidationResult::Valid(value) => {
+                    setting.validation_error = None;
+                    key = setting.def.key.to_string();
+                    label = setting.def.label.to_string();
+                    new_value = value;
+                    setting.current_value = new_value.clone();
                 }
-                InputType::Select(_) | InputType::DynamicSelect(_) => {
-                    Some(Value::String(setting.input_buffer.clone()))
+                ValidationResult::Invalid(err) => {
+                    setting.validation_error = Some(err);
+                    return;
                 }
-                InputType::IntNumber { min, max } => {
-                    if let Ok(n) = setting.input_buffer.parse::<i64>() {
-                        if let Some(min_val) = min {
-                            if n < *min_val {
-                                setting.validation_error = Some(format!("Min: {}", min_val));
-                                None
-                            } else if let Some(max_val) = max {
-                                if n > *max_val {
-                                    setting.validation_error = Some(format!("Max: {}", max_val));
-                                    None
-                                } else {
-                                    setting.validation_error = None;
-                                    Some(Value::Number(n.into()))
-                                }
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else if let Some(max_val) = max {
-                            if n > *max_val {
-                                setting.validation_error = Some(format!("Max: {}", max_val));
-                                None
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else {
-                            setting.validation_error = None;
-                            Some(Value::Number(n.into()))
-                        }
-                    } else {
-                        setting.validation_error = Some("Invalid number".into());
-                        None
-                    }
-                }
-                InputType::FloatNumber { min, max } => {
-                    if let Ok(n) = setting.input_buffer.parse::<f64>() {
-                        if let Some(min_val) = min {
-                            if n < *min_val {
-                                setting.validation_error = Some(format!("Min: {:.1}", min_val));
-                                None
-                            } else if let Some(max_val) = max {
-                                if n > *max_val {
-                                    setting.validation_error = Some(format!("Max: {:.1}", max_val));
-                                    None
-                                } else {
-                                    setting.validation_error = None;
-                                    serde_json::Number::from_f64(n).map(Value::Number)
-                                }
-                            } else {
-                                setting.validation_error = None;
-                                serde_json::Number::from_f64(n).map(Value::Number)
-                            }
-                        } else if let Some(max_val) = max {
-                            if n > *max_val {
-                                setting.validation_error = Some(format!("Max: {:.1}", max_val));
-                                None
-                            } else {
-                                setting.validation_error = None;
-                                serde_json::Number::from_f64(n).map(Value::Number)
-                            }
-                        } else {
-                            setting.validation_error = None;
-                            serde_json::Number::from_f64(n).map(Value::Number)
-                        }
-                    } else {
-                        setting.validation_error = Some("Invalid number".into());
-                        None
-                    }
-                }
-                InputType::Toggle => Some(Value::Bool(setting.input_buffer == "true")),
-                InputType::NullableText => {
-                    if setting.input_buffer.is_empty() {
-                        Some(Value::Null)
-                    } else {
-                        Some(Value::String(setting.input_buffer.clone()))
-                    }
-                }
-                InputType::NullableInt { min, max } => {
-                    if setting.input_buffer.is_empty() {
-                        setting.validation_error = None;
-                        Some(Value::Null)
-                    } else if let Ok(n) = setting.input_buffer.parse::<i64>() {
-                        if let Some(min_val) = min {
-                            if n < *min_val {
-                                setting.validation_error = Some(format!("Min: {}", min_val));
-                                None
-                            } else if let Some(max_val) = max {
-                                if n > *max_val {
-                                    setting.validation_error = Some(format!("Max: {}", max_val));
-                                    None
-                                } else {
-                                    setting.validation_error = None;
-                                    Some(Value::Number(n.into()))
-                                }
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else if let Some(max_val) = max {
-                            if n > *max_val {
-                                setting.validation_error = Some(format!("Max: {}", max_val));
-                                None
-                            } else {
-                                setting.validation_error = None;
-                                Some(Value::Number(n.into()))
-                            }
-                        } else {
-                            setting.validation_error = None;
-                            Some(Value::Number(n.into()))
-                        }
-                    } else {
-                        setting.validation_error = Some("Invalid number".into());
-                        None
-                    }
-                }
-            };
-
-            // If validation failed, return early
-            let Some(value) = result else {
-                return;
-            };
-
-            key = setting.def.key.to_string();
-            label = setting.def.label.to_string();
-            new_value = value;
-            setting.current_value = new_value.clone();
+            }
         }
 
         // Save to file (outside the borrow scope)
@@ -1188,5 +1109,231 @@ fn set_nested_value(json: &mut Value, path: &str, value: Value) {
             }
             current = obj.get_mut(*key).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_test_setting(input_buffer: &str) -> SettingValue {
+        let def = SettingDef {
+            key: "test.key",
+            label: "Test",
+            description: "Test setting",
+            input_type: InputType::Text,
+            default_value: None,
+        };
+        let mut sv = SettingValue::new(def, json!(""));
+        sv.input_buffer = input_buffer.to_string();
+        sv.cursor_pos = sv.input_buffer.chars().count();
+        sv
+    }
+
+    #[test]
+    fn test_setting_value_char_count() {
+        let sv = create_test_setting("hello");
+        assert_eq!(sv.char_count(), 5);
+
+        let sv = create_test_setting("héllo"); // é is single char
+        assert_eq!(sv.char_count(), 5);
+
+        let sv = create_test_setting("日本語"); // 3 Japanese characters
+        assert_eq!(sv.char_count(), 3);
+    }
+
+    #[test]
+    fn test_setting_value_split_at_cursor_ascii() {
+        let mut sv = create_test_setting("hello");
+        sv.cursor_pos = 2;
+        let (before, cursor, after) = sv.split_at_cursor();
+        assert_eq!(before, "he");
+        assert_eq!(cursor, 'l');
+        assert_eq!(after, "lo");
+    }
+
+    #[test]
+    fn test_setting_value_split_at_cursor_unicode() {
+        let mut sv = create_test_setting("héllo");
+        sv.cursor_pos = 1;
+        let (before, cursor, after) = sv.split_at_cursor();
+        assert_eq!(before, "h");
+        assert_eq!(cursor, 'é');
+        assert_eq!(after, "llo");
+    }
+
+    #[test]
+    fn test_setting_value_split_at_cursor_japanese() {
+        let mut sv = create_test_setting("日本語");
+        sv.cursor_pos = 1;
+        let (before, cursor, after) = sv.split_at_cursor();
+        assert_eq!(before, "日");
+        assert_eq!(cursor, '本');
+        assert_eq!(after, "語");
+    }
+
+    #[test]
+    fn test_setting_value_split_at_cursor_end() {
+        let mut sv = create_test_setting("hello");
+        sv.cursor_pos = 5;
+        let (before, cursor, after) = sv.split_at_cursor();
+        assert_eq!(before, "hello");
+        assert_eq!(cursor, ' '); // Space when at end
+        assert_eq!(after, "");
+    }
+
+    #[test]
+    fn test_setting_value_insert_char_at_cursor() {
+        let mut sv = create_test_setting("helo");
+        sv.cursor_pos = 3;
+        sv.insert_char_at_cursor('l');
+        assert_eq!(sv.input_buffer, "hello");
+        assert_eq!(sv.cursor_pos, 4);
+    }
+
+    #[test]
+    fn test_setting_value_insert_unicode_char() {
+        let mut sv = create_test_setting("hello");
+        sv.cursor_pos = 1;
+        sv.insert_char_at_cursor('é');
+        assert_eq!(sv.input_buffer, "héello");
+        assert_eq!(sv.cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_setting_value_delete_char_before_cursor() {
+        let mut sv = create_test_setting("hello");
+        sv.cursor_pos = 3;
+        assert!(sv.delete_char_before_cursor());
+        assert_eq!(sv.input_buffer, "helo");
+        assert_eq!(sv.cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_setting_value_delete_unicode_char_before_cursor() {
+        let mut sv = create_test_setting("héllo");
+        sv.cursor_pos = 2;
+        assert!(sv.delete_char_before_cursor());
+        assert_eq!(sv.input_buffer, "hllo");
+        assert_eq!(sv.cursor_pos, 1);
+    }
+
+    #[test]
+    fn test_setting_value_delete_char_at_cursor() {
+        let mut sv = create_test_setting("hello");
+        sv.cursor_pos = 2;
+        assert!(sv.delete_char_at_cursor());
+        assert_eq!(sv.input_buffer, "helo");
+        assert_eq!(sv.cursor_pos, 2); // Cursor stays
+    }
+
+    #[test]
+    fn test_setting_value_delete_unicode_char_at_cursor() {
+        let mut sv = create_test_setting("héllo");
+        sv.cursor_pos = 1;
+        assert!(sv.delete_char_at_cursor());
+        assert_eq!(sv.input_buffer, "hllo");
+        assert_eq!(sv.cursor_pos, 1);
+    }
+
+    #[test]
+    fn test_setting_value_cursor_movement() {
+        let mut sv = create_test_setting("hello");
+        sv.cursor_pos = 2;
+
+        sv.move_cursor_left();
+        assert_eq!(sv.cursor_pos, 1);
+
+        sv.move_cursor_left();
+        assert_eq!(sv.cursor_pos, 0);
+
+        sv.move_cursor_left(); // Should not go negative
+        assert_eq!(sv.cursor_pos, 0);
+
+        sv.move_cursor_right();
+        assert_eq!(sv.cursor_pos, 1);
+
+        sv.cursor_to_end();
+        assert_eq!(sv.cursor_pos, 5);
+
+        sv.cursor_to_start();
+        assert_eq!(sv.cursor_pos, 0);
+    }
+
+    #[test]
+    fn test_setting_value_cursor_movement_unicode() {
+        let mut sv = create_test_setting("日本語");
+        sv.cursor_pos = 1;
+
+        sv.move_cursor_right();
+        assert_eq!(sv.cursor_pos, 2);
+
+        sv.move_cursor_left();
+        assert_eq!(sv.cursor_pos, 1);
+
+        sv.cursor_to_end();
+        assert_eq!(sv.cursor_pos, 3);
+    }
+
+    #[test]
+    fn test_setting_value_numeric_validation() {
+        let def = SettingDef {
+            key: "test.num",
+            label: "Number",
+            description: "A number",
+            input_type: InputType::IntNumber {
+                min: Some(0),
+                max: Some(100),
+            },
+            default_value: None,
+        };
+        let mut sv = SettingValue::new(def, json!(0));
+        sv.input_buffer = "".to_string();
+        sv.cursor_pos = 0;
+
+        // Digits should be valid
+        assert!(sv.is_valid_numeric_char('5', false));
+
+        // Minus at start should be valid
+        assert!(sv.is_valid_numeric_char('-', false));
+
+        // Letters should be invalid
+        assert!(!sv.is_valid_numeric_char('a', false));
+
+        // Dot should be invalid for int
+        assert!(!sv.is_valid_numeric_char('.', false));
+
+        // Dot should be valid for float
+        assert!(sv.is_valid_numeric_char('.', true));
+    }
+
+    #[test]
+    fn test_get_nested_value() {
+        let json = json!({
+            "level1": {
+                "level2": {
+                    "value": "test"
+                }
+            }
+        });
+
+        let result = get_nested_value(&json, "level1.level2.value");
+        assert_eq!(result, Some(json!("test")));
+
+        let result = get_nested_value(&json, "nonexistent");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_set_nested_value() {
+        let mut json = json!({
+            "level1": {}
+        });
+
+        set_nested_value(&mut json, "level1.level2.value", json!("test"));
+
+        let result = get_nested_value(&json, "level1.level2.value");
+        assert_eq!(result, Some(json!("test")));
     }
 }

@@ -278,6 +278,12 @@ async fn run_event_loop(
                                 continue;
                             }
 
+                            // Handle F2 to toggle search mode
+                            if key.code == KeyCode::F(2) {
+                                app.toggle_search_mode();
+                                continue;
+                            }
+
                             // Handle document modal (Esc handled globally above)
                             if app.search_state.showing_modal {
                                 match key.code {
