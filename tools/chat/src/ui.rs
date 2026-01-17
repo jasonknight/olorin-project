@@ -8,32 +8,722 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::App;
+use crate::app::{ActiveTab, App};
 use crate::message::DisplayMessage;
 
 /// Main UI rendering function
 pub fn render(frame: &mut Frame, app: &App) {
-    // Create layout: main area + status bar
+    // Create layout: tab bar + main area + status bar
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(10),   // Chat + input area
+            Constraint::Length(1), // Tab bar
+            Constraint::Min(10),   // Main content area
             Constraint::Length(1), // Status bar
         ])
         .split(frame.area());
 
-    // Split main area into chat display and input
-    let main_chunks = Layout::default()
+    render_tab_bar(frame, app, chunks[0]);
+
+    match app.active_tab {
+        ActiveTab::Chat => {
+            // Split main area into chat display and input
+            let main_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(5),    // Chat display (expands)
+                    Constraint::Length(5), // Input area (3 lines + border)
+                ])
+                .split(chunks[1]);
+
+            render_chat_display(frame, app, main_chunks[0]);
+            render_input_area(frame, app, main_chunks[1]);
+        }
+        ActiveTab::State => {
+            render_state_display(frame, app, chunks[1]);
+        }
+        ActiveTab::Search => {
+            render_search_display(frame, app, chunks[1]);
+            // Render modal overlays if showing
+            if app.search_state.showing_modal {
+                render_document_modal(frame, app);
+            }
+            if app.search_state.showing_help {
+                render_search_help_modal(frame);
+            }
+        }
+    }
+
+    render_status_bar(frame, app, chunks[2]);
+
+    // Render quit confirmation modal if showing (overlays everything)
+    if app.showing_quit_modal {
+        render_quit_modal(frame);
+    }
+}
+
+/// Render the tab bar at the top
+fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let active_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default().fg(Color::DarkGray).bg(Color::Black);
+    let hint_style = Style::default().fg(Color::DarkGray);
+
+    let chat_style = if app.active_tab == ActiveTab::Chat {
+        active_style
+    } else {
+        inactive_style
+    };
+    let state_style = if app.active_tab == ActiveTab::State {
+        active_style
+    } else {
+        inactive_style
+    };
+    let search_style = if app.active_tab == ActiveTab::Search {
+        active_style
+    } else {
+        inactive_style
+    };
+
+    let tabs = Line::from(vec![
+        Span::styled(" Chat ", chat_style),
+        Span::raw(" "),
+        Span::styled(" State ", state_style),
+        Span::raw(" "),
+        Span::styled(" Search ", search_style),
+        Span::raw("    "),
+        Span::styled("(Shift+Tab to switch)", hint_style),
+    ]);
+
+    let paragraph = Paragraph::new(tabs).style(Style::default().bg(Color::Black));
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the state display tab
+fn render_state_display(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .title(" System State ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if app.state_display.entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No state entries found. Press 'r' to refresh.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (key, value, type_str) in &app.state_display.entries {
+            // Color-code by component prefix
+            let prefix_color = get_prefix_color(key);
+
+            // Format type indicator
+            let type_indicator = match type_str.as_str() {
+                "String" => "[S]",
+                "Int" => "[I]",
+                "Float" => "[F]",
+                "Bool" => "[B]",
+                "Json" => "[J]",
+                "Bytes" => "[Y]",
+                "Null" => "[N]",
+                _ => "[?]",
+            };
+
+            let type_style = Style::default().fg(Color::DarkGray);
+            let key_style = Style::default()
+                .fg(prefix_color)
+                .add_modifier(Modifier::BOLD);
+            let value_style = Style::default().fg(Color::White);
+
+            // Truncate long values
+            let display_value = if value.len() > 60 {
+                format!("{}...", &value[..57])
+            } else {
+                value.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", type_indicator), type_style),
+                Span::styled(format!("{}: ", key), key_style),
+                Span::styled(display_value, value_style),
+            ]));
+        }
+    }
+
+    // Add refresh timestamp at the bottom
+    lines.push(Line::from(""));
+    if let Some(ref last_refresh) = app.state_display.last_refresh {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Last refresh: {} | Press 'r' to refresh",
+                last_refresh.format("%H:%M:%S")
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Press 'r' to refresh",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let total_lines = lines.len();
+    let visible_height = inner.height as usize;
+
+    // Clamp scroll_offset to valid range
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll_offset = app.state_display.scroll_offset.min(max_scroll);
+
+    // Calculate scroll position (scroll_offset is lines from bottom)
+    let end_line = total_lines.saturating_sub(scroll_offset);
+    let start_line = end_line.saturating_sub(visible_height);
+
+    // Get visible lines
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .skip(start_line)
+        .take(visible_height)
+        .collect();
+
+    let paragraph = Paragraph::new(Text::from(visible_lines));
+    frame.render_widget(paragraph, inner);
+
+    // Show scroll indicator if there are more lines above
+    if start_line > 0 {
+        let indicator = Paragraph::new(format!("↑ {} more", start_line))
+            .style(Style::default().fg(Color::DarkGray));
+        let indicator_area = Rect {
+            x: inner.x + inner.width.saturating_sub(12),
+            y: inner.y,
+            width: 12,
+            height: 1,
+        };
+        frame.render_widget(indicator, indicator_area);
+    }
+}
+
+/// Render the search tab display
+fn render_search_display(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::app::SearchFocus;
+
+    // Split into search input area and results area
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),    // Chat display (expands)
-            Constraint::Length(5), // Input area (3 lines + border)
+            Constraint::Length(4), // Search input (2 lines + border)
+            Constraint::Min(5),    // Results list
         ])
-        .split(chunks[0]);
+        .split(area);
 
-    render_chat_display(frame, app, main_chunks[0]);
-    render_input_area(frame, app, main_chunks[1]);
-    render_status_bar(frame, app, chunks[1]);
+    // Render search input
+    let input_border_color = if app.search_state.focus == SearchFocus::Input {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
+    let input_block = Block::default()
+        .title(" Search Query (Tab to focus, Enter to search) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(input_border_color));
+
+    let input_inner = input_block.inner(chunks[0]);
+    frame.render_widget(input_block, chunks[0]);
+
+    // Render the query text with word wrapping
+    let query_text = if app.search_state.query.is_empty() {
+        Span::styled(
+            "Type your search query...",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(&app.search_state.query, Style::default().fg(Color::White))
+    };
+
+    let query_paragraph =
+        Paragraph::new(Line::from(query_text)).wrap(ratatui::widgets::Wrap { trim: false });
+    frame.render_widget(query_paragraph, input_inner);
+
+    // Show cursor if input is focused
+    if app.search_state.focus == SearchFocus::Input {
+        let cursor_x = input_inner.x + app.search_state.query.chars().count() as u16;
+        let cursor_x = cursor_x.min(input_inner.x + input_inner.width - 1);
+        frame.set_cursor_position((cursor_x, input_inner.y));
+    }
+
+    // Render results area
+    let results_border_color = if app.search_state.focus == SearchFocus::Results {
+        Color::Yellow
+    } else {
+        Color::Blue
+    };
+
+    let context_count = app.search_state.context_ids.len();
+    let results_title = if app.search_state.query.is_empty() {
+        format!(" Context Documents ({}) ", context_count)
+    } else {
+        format!(" Search Results ({}) ", app.search_state.results.len())
+    };
+
+    let results_block = Block::default()
+        .title(results_title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(results_border_color));
+
+    let results_inner = results_block.inner(chunks[1]);
+    frame.render_widget(results_block, chunks[1]);
+
+    // Render results list
+    if app.search_state.results.is_empty() {
+        let empty_text = if app.search_state.is_loading {
+            "Searching..."
+        } else if let Some(ref error) = app.search_state.error {
+            error.as_str()
+        } else if app.search_state.query.is_empty() {
+            "No context documents. Search to find documents to add."
+        } else {
+            "No results found."
+        };
+
+        let empty_paragraph = Paragraph::new(Span::styled(
+            empty_text,
+            Style::default().fg(Color::DarkGray),
+        ));
+        frame.render_widget(empty_paragraph, results_inner);
+    } else {
+        let visible_height = results_inner.height as usize;
+        let selected = app.search_state.selected_index;
+
+        // Calculate scroll to keep selection visible
+        let start_idx = if selected >= visible_height {
+            selected - visible_height + 1
+        } else {
+            0
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        for (i, result) in app
+            .search_state
+            .results
+            .iter()
+            .enumerate()
+            .skip(start_idx)
+            .take(visible_height)
+        {
+            let is_selected = i == selected;
+
+            // Build the line
+            let context_indicator = if result.is_in_context {
+                Span::styled("[+] ", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("[ ] ", Style::default().fg(Color::DarkGray))
+            };
+
+            // Source info - constrain to max 25 characters
+            const MAX_SOURCE_LEN: usize = 25;
+            let source_text = result
+                .source
+                .as_ref()
+                .map(|s| {
+                    // Extract just the filename
+                    let filename = s.rsplit('/').next().unwrap_or(s);
+                    // Truncate if too long
+                    if filename.len() > MAX_SOURCE_LEN {
+                        format!("{}...", &filename[..MAX_SOURCE_LEN - 3])
+                    } else {
+                        filename.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Distance info
+            let distance_text = result
+                .distance
+                .map(|d| format!(" ({:.3})", d))
+                .unwrap_or_default();
+
+            // Truncate text preview - account for source column width
+            let max_preview_len = results_inner.width as usize - MAX_SOURCE_LEN - 20;
+            let preview = result.text.lines().next().unwrap_or("");
+            let preview = if preview.len() > max_preview_len {
+                format!("{}...", &preview[..max_preview_len.saturating_sub(3)])
+            } else {
+                preview.to_string()
+            };
+
+            let base_style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let source_style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+
+            let preview_style = if is_selected {
+                Style::default().bg(Color::DarkGray).fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+
+            // Pad source text to fixed width for alignment
+            let padded_source = format!("{:<width$}", source_text, width = MAX_SOURCE_LEN);
+
+            lines.push(Line::from(vec![
+                context_indicator,
+                Span::styled(padded_source, source_style),
+                Span::styled(distance_text, base_style),
+                Span::styled(" - ", base_style),
+                Span::styled(preview, preview_style),
+            ]));
+        }
+
+        let paragraph = Paragraph::new(Text::from(lines));
+        frame.render_widget(paragraph, results_inner);
+
+        // Show scroll indicator if needed
+        if app.search_state.results.len() > visible_height {
+            let scroll_info = format!("{}/{}", selected + 1, app.search_state.results.len());
+            let scroll_paragraph =
+                Paragraph::new(scroll_info).style(Style::default().fg(Color::DarkGray));
+            let scroll_area = Rect {
+                x: results_inner.x + results_inner.width.saturating_sub(10),
+                y: chunks[1].y,
+                width: 10,
+                height: 1,
+            };
+            frame.render_widget(scroll_paragraph, scroll_area);
+        }
+    }
+
+    // Render help line at the bottom of results area
+    let help_text = if app.search_state.focus == SearchFocus::Input {
+        "Tab: focus results | Enter: search | Esc: quit"
+    } else {
+        "Tab: focus input | Enter: view | a: add | r: remove | Esc: quit"
+    };
+
+    let help_area = Rect {
+        x: chunks[1].x + 1,
+        y: chunks[1].y + chunks[1].height - 1,
+        width: chunks[1].width - 2,
+        height: 1,
+    };
+
+    let help_paragraph = Paragraph::new(Span::styled(
+        help_text,
+        Style::default().fg(Color::DarkGray),
+    ));
+    frame.render_widget(help_paragraph, help_area);
+}
+
+/// Render a modal overlay showing the full document text
+fn render_document_modal(frame: &mut Frame, app: &App) {
+    use ratatui::widgets::Clear;
+
+    let area = frame.area();
+
+    // Create a centered modal that takes up most of the screen
+    let modal_width = (area.width as f32 * 0.85) as u16;
+    let modal_height = (area.height as f32 * 0.85) as u16;
+    let modal_x = (area.width - modal_width) / 2;
+    let modal_y = (area.height - modal_height) / 2;
+
+    let modal_area = Rect {
+        x: modal_x,
+        y: modal_y,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area completely first
+    frame.render_widget(Clear, modal_area);
+
+    if let Some(result) = app.get_selected_search_result() {
+        // Strip common directory prefix to save space in the header
+        let source_text = result
+            .source
+            .as_deref()
+            .unwrap_or("Unknown source")
+            .strip_prefix("/Users/olorin/Documents/AI_IN/")
+            .or_else(|| {
+                result
+                    .source
+                    .as_deref()
+                    .unwrap_or("Unknown source")
+                    .strip_prefix("~/Documents/AI_IN/")
+            })
+            .unwrap_or_else(|| result.source.as_deref().unwrap_or("Unknown source"));
+
+        let context_status = if result.is_in_context {
+            "[In Context]"
+        } else {
+            "[Not in Context]"
+        };
+
+        let title = format!(" {} {} ", source_text, context_status);
+
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .style(Style::default().bg(Color::Black));
+
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        // Render the document text with word wrapping and markdown
+        let wrap_width = inner.width.saturating_sub(2) as usize;
+        let content_lines = render_markdown(&result.text, wrap_width);
+
+        // Add help text at the bottom
+        let mut all_lines = content_lines;
+        all_lines.push(Line::from(""));
+        all_lines.push(Line::from(Span::styled(
+            "─".repeat(wrap_width.min(60)),
+            Style::default().fg(Color::DarkGray),
+        )));
+        all_lines.push(Line::from(Span::styled(
+            "Esc: close | a: add to context | r: remove from context",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let paragraph = Paragraph::new(Text::from(all_lines))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .style(Style::default().bg(Color::Black));
+
+        frame.render_widget(paragraph, inner);
+    }
+}
+
+/// Render a quit confirmation modal
+fn render_quit_modal(frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+
+    let area = frame.area();
+
+    // Create a compact centered modal
+    let modal_width = 22;
+    let modal_height = 3;
+    let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+
+    let modal_area = Rect {
+        x: modal_x,
+        y: modal_y,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title(" Quit? ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Button-style layout: [ Yes (y) ]  [ No (n) ]
+    let button_style = Style::default().fg(Color::White).bg(Color::DarkGray);
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+
+    let text = Line::from(vec![
+        Span::styled(" Yes ", button_style),
+        Span::styled("y", key_style),
+        Span::styled(" ", button_style),
+        Span::raw("  "),
+        Span::styled(" No ", button_style),
+        Span::styled("n", key_style),
+        Span::styled(" ", button_style),
+    ]);
+
+    let paragraph = Paragraph::new(text)
+        .style(Style::default().bg(Color::Black))
+        .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(paragraph, inner);
+}
+
+/// Render the search help modal
+fn render_search_help_modal(frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+
+    let area = frame.area();
+
+    // Create a centered modal taking 80% of width, 85% of height
+    let modal_width = (area.width as f32 * 0.80) as u16;
+    let modal_height = (area.height as f32 * 0.85) as u16;
+    let modal_x = (area.width - modal_width) / 2;
+    let modal_y = (area.height - modal_height) / 2;
+
+    let modal_area = Rect {
+        x: modal_x,
+        y: modal_y,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title(" Search Help (Press Esc to close) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(Color::White);
+    let dim_style = Style::default().fg(Color::DarkGray);
+
+    let help_lines: Vec<Line> = vec![
+        Line::from(Span::styled("SEMANTIC SEARCH", header_style)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("The search system uses ", text_style),
+            Span::styled("semantic embeddings", key_style),
+            Span::styled(" to find documents by meaning,", text_style),
+        ]),
+        Line::from(Span::styled(
+            "not just keyword matching. This means:",
+            text_style,
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  • ", dim_style),
+            Span::styled("\"how to cook pasta\"", key_style),
+            Span::styled(" finds docs about ", text_style),
+            Span::styled("making noodles", key_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  • ", dim_style),
+            Span::styled("\"error handling\"", key_style),
+            Span::styled(" finds docs about ", text_style),
+            Span::styled("exceptions, try/catch", key_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  • ", dim_style),
+            Span::styled("Distance score", text_style),
+            Span::styled(" (0.xxx) shows similarity - ", dim_style),
+            Span::styled("lower = more similar", key_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("CONTEXT DOCUMENTS", header_style)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Documents added to context are included in AI conversations.",
+            text_style,
+        )),
+        Line::from(Span::styled(
+            "The token count shows total size of context for model limits.",
+            text_style,
+        )),
+        Line::from(vec![
+            Span::styled("[+]", Style::default().fg(Color::Green)),
+            Span::styled(" = in context, ", dim_style),
+            Span::styled("[ ]", dim_style),
+            Span::styled(" = not in context", dim_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("KEYBOARD SHORTCUTS", header_style)),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Tab       ", key_style),
+            Span::styled("Switch between search input and results", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Enter     ", key_style),
+            Span::styled("Execute search / View selected document", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  ↑/↓       ", key_style),
+            Span::styled("Navigate results", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  PgUp/PgDn ", key_style),
+            Span::styled("Jump 10 results", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  a         ", key_style),
+            Span::styled("Add selected document to context", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  r         ", key_style),
+            Span::styled("Remove selected document from context", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?         ", key_style),
+            Span::styled("Show this help", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc       ", key_style),
+            Span::styled("Close modal / Quit", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift+Tab ", key_style),
+            Span::styled("Switch to other tabs", text_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("EMPTY SEARCH", header_style)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "When the search query is empty, the results area shows all",
+            text_style,
+        )),
+        Line::from(Span::styled(
+            "documents currently in your context.",
+            text_style,
+        )),
+    ];
+
+    let paragraph = Paragraph::new(Text::from(help_lines))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .style(Style::default().bg(Color::Black));
+
+    frame.render_widget(paragraph, inner);
+}
+
+/// Get color for a state key based on its component prefix
+fn get_prefix_color(key: &str) -> Color {
+    if key.starts_with("broca.") {
+        Color::Magenta
+    } else if key.starts_with("cortex.") {
+        Color::Green
+    } else if key.starts_with("enrichener.") {
+        Color::Blue
+    } else if key.starts_with("hippocampus.") {
+        Color::Yellow
+    } else if key.starts_with("tools.") {
+        Color::LightBlue
+    } else if key.starts_with("system.") {
+        Color::Cyan
+    } else {
+        Color::White
+    }
 }
 
 /// Render the chat message display
@@ -685,34 +1375,64 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the status bar
 fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let scroll_indicator = if app.auto_scroll { "" } else { " [SCROLLED] " };
-    let tab_hint = if app.completion.is_some() {
-        "Tab: Complete | "
-    } else {
-        ""
-    };
+    let status_text = match app.active_tab {
+        ActiveTab::Chat => {
+            let scroll_indicator = if app.auto_scroll { "" } else { " [SCROLLED] " };
+            let tab_hint = if app.completion.is_some() {
+                "Tab: Complete | "
+            } else {
+                ""
+            };
 
-    // Format token count with K suffix for thousands
-    let token_display = if app.token_count >= 1000 {
-        format!("{:.1}K", app.token_count as f64 / 1000.0)
-    } else {
-        format!("{}", app.token_count)
-    };
+            // Format token count with K suffix for thousands
+            let token_display = if app.token_count >= 1000 {
+                format!("{:.1}K", app.token_count as f64 / 1000.0)
+            } else {
+                format!("{}", app.token_count)
+            };
 
-    let status_text = format!(
-        " {} | Msgs: {} | Tokens: {}{} | {}Enter: Send | Shift+Enter: Newline | Esc: Quit ",
-        app.status,
-        app.message_count(),
-        token_display,
-        scroll_indicator,
-        tab_hint
-    );
+            format!(
+                " {} | Msgs: {} | Tokens: {}{} | {}Enter: Send | Shift+Enter: Newline | Esc: Quit ",
+                app.status,
+                app.message_count(),
+                token_display,
+                scroll_indicator,
+                tab_hint
+            )
+        }
+        ActiveTab::State => {
+            format!(
+                " {} | Entries: {} | r: Refresh | Up/Down: Scroll | Esc: Quit ",
+                app.status,
+                app.state_display.entries.len()
+            )
+        }
+        ActiveTab::Search => {
+            let context_count = app.search_state.context_ids.len();
+            // Format token count with K suffix for thousands
+            let token_display = if app.search_state.context_token_count >= 1000 {
+                format!(
+                    "{:.1}K",
+                    app.search_state.context_token_count as f64 / 1000.0
+                )
+            } else {
+                format!("{}", app.search_state.context_token_count)
+            };
+            format!(
+                " {} | Results: {} | Context: {} ({} tokens) | ?: help ",
+                app.status,
+                app.search_state.results.len(),
+                context_count,
+                token_display
+            )
+        }
+    };
 
     let style = if app.is_sending {
         Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-    } else if !app.auto_scroll {
+    } else if app.active_tab == ActiveTab::Chat && !app.auto_scroll {
         Style::default().fg(Color::Cyan).bg(Color::DarkGray)
-    } else if app.status.starts_with("Error") {
+    } else if app.status.starts_with("Error") || app.status.starts_with("Failed") {
         Style::default().fg(Color::Red).bg(Color::DarkGray)
     } else {
         Style::default().fg(Color::White).bg(Color::DarkGray)

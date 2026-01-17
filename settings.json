@@ -97,6 +97,10 @@
       "model": "nomic-ai/nomic-embed-text-v1.5",
       "document_prefix": "search_document: ",
       "query_prefix": "search_query: "
+    },
+    "search": {
+      "enabled": true,
+      "port": 8772
     }
   }
 }

@@ -1,65 +1,191 @@
 #!/bin/bash
 # Orchestration script to bring up all olorin-project components
+#
+# This script starts the entire olorin-project infrastructure:
+# 1. Containers: Kafka (message broker) and ChromaDB (vector database)
+# 2. Tool servers: AI tools (write, embeddings, search) that run as HTTP servers
+# 3. Consumer daemons: Python processes that consume from Kafka and process data
+#
+# Components are discovered from settings.json where possible to avoid hardcoding.
 
 set -e
 
 # Get the directory where this script lives (project root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Colors for output
+# Terminal colors for status messages
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# Create directories for PIDs and logs
-mkdir -p .pids
-mkdir -p logs
-mkdir -p data
+# Create required directories
+mkdir -p .pids   # Process ID files for daemon management
+mkdir -p logs    # Log files for all components
+mkdir -p data    # Shared data directory
 
-# Function to update state database
-update_state() {
-    local key=$1
-    local value=$2
-    local value_type=${3:-"int"}  # default to int
+# =============================================================================
+# Port and Process Management Functions
+# =============================================================================
 
-    cd "$SCRIPT_DIR"
-    if [ "$value_type" = "int" ]; then
-        python3 -c "
-import sys
-sys.path.insert(0, '.')
-from libs.state import get_state
-state = get_state()
-state.set_int('$key', $value)
-" 2>/dev/null || true
-    elif [ "$value_type" = "string" ]; then
-        python3 -c "
-import sys
-sys.path.insert(0, '.')
-from libs.state import get_state
-state = get_state()
-state.set_string('$key', '$value')
-" 2>/dev/null || true
-    elif [ "$value_type" = "bool" ]; then
-        python3 -c "
-import sys
-sys.path.insert(0, '.')
-from libs.state import get_state
-state = get_state()
-state.set_bool('$key', $value)
-" 2>/dev/null || true
+# Check if a port is in use and return the PID using it
+check_port_in_use() {
+    local port=$1
+    lsof -ti :$port 2>/dev/null | head -1
+}
+
+# Get the command line of a running process
+get_process_cmdline() {
+    local pid=$1
+    ps -p "$pid" -o args= 2>/dev/null || echo ""
+}
+
+# Determine if a process belongs to olorin-project (safe to kill during cleanup)
+# This prevents accidentally killing unrelated processes that happen to use our ports
+is_olorin_tool_process() {
+    local pid=$1
+    local port=$2
+    local cmdline=$(get_process_cmdline "$pid")
+
+    # Check multiple indicators to identify our processes:
+    # Path-based checks
+    [[ "$cmdline" == *"olorin-project/tools/"* ]] && return 0
+    [[ "$cmdline" == *"tools/"*"server.py"* ]] && return 0
+    [[ "$cmdline" == *"tools/"*"/write"* ]] && return 0
+
+    # Working directory check
+    local cwd=$(lsof -p "$pid" 2>/dev/null | grep cwd | awk '{print $NF}')
+    [[ "$cwd" == *"olorin-project/tools/"* ]] && return 0
+
+    # Port-based checks for Python servers
+    [[ "$cmdline" == *"python"*"server.py"*"--port"*"$port"* ]] && return 0
+    [[ "$cmdline" == *"server.py"*"$port"* ]] && return 0
+
+    return 1
+}
+
+# Clean up an orphaned process on a specific port
+# Only kills processes that belong to olorin-project (verified by is_olorin_tool_process)
+cleanup_orphaned_port() {
+    local port=$1
+    local tool_name=$2
+    local pid=$(check_port_in_use "$port")
+
+    [ -z "$pid" ] && return 0  # Port is free
+
+    if is_olorin_tool_process "$pid" "$port"; then
+        echo -e "${YELLOW}Found orphaned process (PID: $pid) on port $port, cleaning up...${NC}"
+        kill "$pid" 2>/dev/null || true
+
+        # Wait up to 5 seconds for graceful shutdown
+        local count=0
+        while [ $count -lt 10 ]; do
+            ps -p "$pid" > /dev/null 2>&1 || { echo -e "${GREEN}Cleaned up orphaned process${NC}"; return 0; }
+            sleep 0.5
+            count=$((count + 1))
+        done
+
+        # Force kill if still running after graceful attempt
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 0.5
+        if ps -p "$pid" > /dev/null 2>&1; then
+            echo -e "${RED}Failed to kill orphaned process on port $port${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}Force-killed orphaned process${NC}"
+        return 0
+    else
+        echo -e "${RED}Port $port is in use by non-olorin process (PID: $pid)${NC}"
+        echo -e "${RED}Command: $(get_process_cmdline $pid)${NC}"
+        echo -e "${RED}Please free this port manually before starting${NC}"
+        return 1
     fi
 }
 
-# Function to set state to running
+# Clean up all tool ports before starting (reads enabled tools from settings.json)
+cleanup_tool_ports() {
+    echo -e "${YELLOW}Checking for orphaned processes on tool ports...${NC}"
+    local failed=0
+
+    # Dynamically read enabled tools and their ports from settings.json
+    local ports=$(python3 -c "
+import json
+with open('settings.json') as f:
+    settings = json.load(f)
+for name, config in settings.get('tools', {}).items():
+    if config.get('enabled', True) and config.get('port'):
+        print(f'{name}:{config[\"port\"]}')
+" 2>/dev/null)
+
+    for entry in $ports; do
+        local name=$(echo "$entry" | cut -d: -f1)
+        local port=$(echo "$entry" | cut -d: -f2)
+        cleanup_orphaned_port "$port" "$name" || failed=1
+    done
+
+    if [ $failed -eq 1 ]; then
+        echo -e "${RED}Failed to clean up some ports. Aborting startup.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}All tool ports are available${NC}"
+}
+
+# =============================================================================
+# State Management Functions (SQLite-backed shared state)
+# =============================================================================
+
+# Remove stale state entries from previous runs
+cleanup_stale_state() {
+    echo -e "${YELLOW}Cleaning up stale state entries...${NC}"
+    cd "$SCRIPT_DIR"
+    python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+
+# Clear all runtime state that should be fresh on startup
+for prefix in ['tool-', 'tools.', 'system.pids.']:
+    state.delete_prefix(prefix)
+
+# Clear component status entries
+for key in state.keys():
+    if key.endswith('.status'):
+        state.delete(key)
+" 2>/dev/null || true
+    echo -e "${GREEN}Stale state entries cleaned${NC}"
+}
+
+# Update a value in the shared state database
+# Usage: update_state <key> <value> [type]
+# Types: int (default), string, bool
+update_state() {
+    local key=$1
+    local value=$2
+    local value_type=${3:-"int"}
+
+    cd "$SCRIPT_DIR"
+    python3 -c "
+import sys
+sys.path.insert(0, '.')
+from libs.state import get_state
+state = get_state()
+setter = {'int': state.set_int, 'string': state.set_string, 'bool': state.set_bool}['$value_type']
+setter('$key', $value if '$value_type' != 'string' else '$value')
+" 2>/dev/null || true
+}
+
+# Mark the system as running with timestamp
 set_system_running() {
     update_state "system.running" "True" "bool"
     update_state "system.started_at" "$(date -u +%Y-%m-%dT%H:%M:%S)" "string"
 }
 
-echo -e "${GREEN}Starting olorin-project infrastructure...${NC}"
+# =============================================================================
+# Container and Daemon Management Functions
+# =============================================================================
 
-# Function to wait for a container to be healthy
+# Wait for a container to become available (up to 30 seconds)
 wait_for_container() {
     local container_name=$1
     local max_wait=30
@@ -79,36 +205,32 @@ wait_for_container() {
     return 1
 }
 
-# Function to start a Python script in the background
+# Start a Python daemon with optional virtualenv
+# Usage: start_daemon <name> <directory> <script> [venv_required=true]
 start_daemon() {
     local name=$1
     local dir=$2
     local script=$3
-    local venv_required=$4
+    local venv_required=${4:-"true"}  # Default to requiring venv
 
     echo -e "${YELLOW}Starting $name...${NC}"
 
     cd "$dir"
 
     if [ "$venv_required" = "true" ]; then
-        # Check if virtual environment exists
-        if [ ! -d "venv" ]; then
+        # Ensure virtual environment exists
+        [ ! -d "venv" ] && {
             echo -e "${YELLOW}Creating virtual environment for $name...${NC}"
             python3 -m venv venv
-        fi
+        }
 
         source venv/bin/activate
-
-        # Always install/update requirements
         echo -e "${YELLOW}Installing requirements for $name...${NC}"
         pip install -q -r requirements.txt > "../logs/${name}_setup.log" 2>&1
-
-        # Start the script with venv activated (-u for unbuffered output)
-        nohup python3 -u "$script" > "../logs/${name}.log" 2>&1 &
-    else
-        # Start the script without venv (-u for unbuffered output)
-        nohup python3 -u "$script" > "../logs/${name}.log" 2>&1 &
     fi
+
+    # Start the script (-u for unbuffered output to logs)
+    nohup python3 -u "$script" > "../logs/${name}.log" 2>&1 &
 
     local pid=$!
     echo $pid > "../.pids/${name}.pid"
@@ -116,52 +238,72 @@ start_daemon() {
 
     cd - > /dev/null
 
-    # Update state database with PID
+    # Record in state database
     update_state "system.pids.${name}" "$pid" "int"
     update_state "${name}.status" "running" "string"
 }
 
-# Function to start a Rust tool server
+# =============================================================================
+# Tool Server Functions
+# =============================================================================
+
+# Record tool server state after successful start
+# Usage: record_tool_state <name> <pid> <port>
+record_tool_state() {
+    local name=$1
+    local pid=$2
+    local port=$3
+    echo $pid > ".pids/tool-${name}.pid"
+    echo -e "${GREEN}Started ${name} tool server (PID: $pid, port: $port)${NC}"
+    update_state "system.pids.tool-${name}" "$pid" "int"
+    update_state "tools.${name}.status" "running" "string"
+    update_state "tools.${name}.port" "$port" "int"
+}
+
+# Pre-flight check for tool server port availability
+# Usage: check_tool_port <name> <port>
+check_tool_port() {
+    local name=$1
+    local port=$2
+    local pid_on_port=$(check_port_in_use "$port")
+    if [ -n "$pid_on_port" ]; then
+        echo -e "${RED}Port $port still in use by PID $pid_on_port, cannot start ${name}${NC}"
+        return 1
+    fi
+    return 0
+}
+
+# Start a Rust tool server (builds if necessary)
 start_rust_tool() {
     local name=$1
     local port=$2
     local dir="tools/${name}"
 
     echo -e "${YELLOW}Starting ${name} tool server...${NC}"
-
     cd "$SCRIPT_DIR"
+
+    check_tool_port "$name" "$port" || return 1
 
     if [ ! -f "${dir}/Cargo.toml" ]; then
         echo -e "${RED}No Cargo.toml found for ${name} tool, skipping${NC}"
         return 1
     fi
 
-    # Check if binary exists, build if not
+    # Build if binary doesn't exist
     local binary="${dir}/target/release/${name}"
     if [ ! -f "$binary" ]; then
         echo -e "${YELLOW}Building ${name} tool (this may take a moment)...${NC}"
-        (cd "${dir}" && cargo build --release > "../logs/tool-${name}-build.log" 2>&1)
-        if [ $? -ne 0 ]; then
+        (cd "${dir}" && cargo build --release > "../logs/tool-${name}-build.log" 2>&1) || {
             echo -e "${RED}Failed to build ${name} tool${NC}"
             return 1
-        fi
+        }
     fi
 
-    # Start the tool server
     nohup "$binary" --port "$port" > "logs/tool-${name}.log" 2>&1 &
-    local pid=$!
-    echo $pid > ".pids/tool-${name}.pid"
-    echo -e "${GREEN}Started ${name} tool server (PID: $pid, port: $port)${NC}"
-
-    # Update state database
-    update_state "system.pids.tool-${name}" "$pid" "int"
-    update_state "tools.${name}.status" "running" "string"
-    update_state "tools.${name}.port" "$port" "int"
-
-    return 0
+    record_tool_state "$name" $! "$port"
 }
 
-# Function to start a Python tool server
+# Start a Python tool server with virtualenv
 start_python_tool() {
     local name=$1
     local port=$2
@@ -169,8 +311,9 @@ start_python_tool() {
     local dir="tools/${name}"
 
     echo -e "${YELLOW}Starting ${name} tool server...${NC}"
-
     cd "$SCRIPT_DIR"
+
+    check_tool_port "$name" "$port" || return 1
 
     if [ ! -f "${dir}/${script}" ]; then
         echo -e "${RED}No ${script} found for ${name} tool, skipping${NC}"
@@ -179,38 +322,37 @@ start_python_tool() {
 
     cd "${dir}"
 
-    # Check if virtual environment exists
-    if [ ! -d "venv" ]; then
+    # Setup virtualenv
+    [ ! -d "venv" ] && {
         echo -e "${YELLOW}Creating virtual environment for ${name} tool...${NC}"
         python3 -m venv venv
-    fi
-
+    }
     source venv/bin/activate
 
-    # Install/update requirements if requirements.txt exists
+    # Install dependencies
     if [ -f "requirements.txt" ]; then
         echo -e "${YELLOW}Installing requirements for ${name} tool...${NC}"
         pip install -q -r requirements.txt > "../../logs/tool-${name}-setup.log" 2>&1
     fi
-
-    # Install parent libs dependencies (for libs imports)
+    # Common libs dependencies
     pip install -q flask waitress requests numpy sentence-transformers >> "../../logs/tool-${name}-setup.log" 2>&1
 
-    # Start the tool server
     nohup python3 -u "${script}" --port "$port" > "../../logs/tool-${name}.log" 2>&1 &
     local pid=$!
-    echo $pid > "../../.pids/tool-${name}.pid"
-    echo -e "${GREEN}Started ${name} tool server (PID: $pid, port: $port)${NC}"
 
     cd "$SCRIPT_DIR"
-
-    # Update state database
-    update_state "system.pids.tool-${name}" "$pid" "int"
-    update_state "tools.${name}.status" "running" "string"
-    update_state "tools.${name}.port" "$port" "int"
-
-    return 0
+    record_tool_state "$name" "$pid" "$port"
 }
+
+# =============================================================================
+# Main Startup Sequence
+# =============================================================================
+
+echo -e "${GREEN}Starting olorin-project infrastructure...${NC}"
+
+# Clean up stale state and orphaned processes before starting
+cleanup_stale_state
+cleanup_tool_ports
 
 # 1. Start Broca (Kafka)
 echo -e "\n${GREEN}=== Starting Broca (Kafka) ===${NC}"
@@ -272,51 +414,73 @@ sleep 2  # Give ChromaDB time to initialize
 update_state "containers.chromadb.status" "running" "string"
 update_state "containers.chromadb.port" "8000" "int"
 
-# 3. Start Exo (AI inference)
-echo -e "\n${GREEN}=== Starting Exo (AI Inference) ===${NC}"
-
-# 4. Start AI tool servers (before consumers so tools are available for discovery)
+# 3. Start AI tool servers (before consumers so tools are available for discovery)
+# Tools are discovered from settings.json - add new tools there, not here
 echo -e "\n${GREEN}=== Starting AI Tool Servers ===${NC}"
 
-# Start the write tool server (Rust)
-start_rust_tool "write" "8770"
+# Read enabled tools from settings.json and start each one
+# Format: name:port:type (type is "rust" or "python")
+tool_configs=$(python3 -c "
+import json, os
+with open('settings.json') as f:
+    settings = json.load(f)
+for name, config in settings.get('tools', {}).items():
+    if not config.get('enabled', True):
+        continue
+    port = config.get('port')
+    if not port:
+        continue
+    # Detect tool type by checking for Cargo.toml vs server.py
+    tool_dir = f'tools/{name}'
+    if os.path.exists(f'{tool_dir}/Cargo.toml'):
+        tool_type = 'rust'
+    elif os.path.exists(f'{tool_dir}/server.py'):
+        tool_type = 'python'
+    else:
+        continue  # Skip unknown tool types
+    print(f'{name}:{port}:{tool_type}')
+" 2>/dev/null)
 
-# Start the embeddings tool server (Python)
-# Note: This loads the embedding model which takes time on first run
-start_python_tool "embeddings" "8771"
+for config in $tool_configs; do
+    name=$(echo "$config" | cut -d: -f1)
+    port=$(echo "$config" | cut -d: -f2)
+    tool_type=$(echo "$config" | cut -d: -f3)
+
+    if [ "$tool_type" = "rust" ]; then
+        start_rust_tool "$name" "$port"
+    elif [ "$tool_type" = "python" ]; then
+        start_python_tool "$name" "$port"
+    fi
+done
 
 # Give tool servers a moment to start
 sleep 2
 
-# 5. Start all consumer and tracking scripts
+# 4. Start all consumer and tracking daemons
+# Each entry: name directory script
 echo -e "\n${GREEN}=== Starting Consumer Scripts ===${NC}"
 
-# Start Cortex consumer
-start_daemon "cortex-consumer" "cortex" "consumer.py" "true"
+# Define daemons as: name|directory|script
+# Add new daemons here - they will be started in order
+DAEMONS="
+cortex-consumer|cortex|consumer.py
+cortex-controller|cortex|controller.py
+broca-consumer|broca|consumer.py
+hippocampus-pdf-tracker|hippocampus|pdf_tracker.py
+hippocampus-ebook-tracker|hippocampus|ebook_tracker.py
+hippocampus-txt-tracker|hippocampus|txt_tracker.py
+hippocampus-office-tracker|hippocampus|office_tracker.py
+hippocampus-ingest|hippocampus|ingest.py
+hippocampus-enrichener|hippocampus|enrichener.py
+"
 
-# Start Cortex controller (control command handler)
-start_daemon "cortex-controller" "cortex" "controller.py" "true"
-
-# Start Broca consumer
-start_daemon "broca-consumer" "broca" "consumer.py" "true"
-
-# Start Hippocampus pdf_tracker
-start_daemon "hippocampus-pdf-tracker" "hippocampus" "pdf_tracker.py" "true"
-
-# Start Hippocampus ebook_tracker (EPUB/MOBI)
-start_daemon "hippocampus-ebook-tracker" "hippocampus" "ebook_tracker.py" "true"
-
-# Start Hippocampus txt_tracker (TXT to MD)
-start_daemon "hippocampus-txt-tracker" "hippocampus" "txt_tracker.py" "true"
-
-# Start Hippocampus office_tracker (DOC/DOCX/ODT to MD)
-start_daemon "hippocampus-office-tracker" "hippocampus" "office_tracker.py" "true"
-
-# Start Hippocampus ingest
-start_daemon "hippocampus-ingest" "hippocampus" "ingest.py" "true"
-
-# Start Hippocampus enrichener (prompt enrichment with ChromaDB context)
-start_daemon "hippocampus-enrichener" "hippocampus" "enrichener.py" "true"
+for daemon in $DAEMONS; do
+    [ -z "$daemon" ] && continue
+    name=$(echo "$daemon" | cut -d'|' -f1)
+    dir=$(echo "$daemon" | cut -d'|' -f2)
+    script=$(echo "$daemon" | cut -d'|' -f3)
+    start_daemon "$name" "$dir" "$script"
+done
 
 # Update system state
 set_system_running

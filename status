@@ -220,7 +220,6 @@ def check_state():
         "stopped_at": None,
         "pids": {},
         "containers": {},
-        "component_status": {},
     }
 
     try:
@@ -253,12 +252,8 @@ def check_state():
                 elif prop == "port":
                     state_info["containers"][container]["port"] = state.get_int(key)
 
-        # Get component status
-        for key in state.keys():
-            if key.endswith(".status") and not key.startswith("containers."):
-                component = key.replace(".status", "")
-                if component != "system":
-                    state_info["component_status"][component] = state.get_string(key)
+        # Note: We no longer track component_status from state DB since it becomes stale.
+        # Actual status is determined by checking processes and HTTP health endpoints.
 
     except Exception as e:
         state_info["error"] = str(e)
@@ -556,16 +551,13 @@ def print_state_info(state_info):
                 f"    {container:<15} {status_color}{status:<10}{Color.NC} port:{port}"
             )
 
-    # Component status
-    if state_info["component_status"]:
-        print(f"\n  {Color.BOLD}Component Status:{Color.NC}")
-        for component, status in sorted(state_info["component_status"].items()):
-            status_color = Color.GREEN if status == "running" else Color.RED
-            icon = get_status_icon(status == "running")
-            print(f"    {icon} {component:<30} {status_color}{status}{Color.NC}")
+    # Note: Component status is now determined dynamically from process checks and
+    # HTTP health endpoints, not from stale state DB entries.
 
 
-def print_summary(containers, processes, log_analysis, state_info=None):
+def print_summary(
+    containers, processes, log_analysis, state_info=None, tool_servers=None
+):
     """Print overall system summary."""
     print_section("System Summary")
 
@@ -575,6 +567,9 @@ def print_summary(containers, processes, log_analysis, state_info=None):
 
     healthy_processes = sum(1 for p in processes if p["running"])
     total_processes = len(processes)
+
+    healthy_tools = sum(1 for t in (tool_servers or []) if t["healthy"])
+    total_tools = len(tool_servers or [])
 
     log_errors = sum(a["errors"] for a in log_analysis.values())
     log_warnings = sum(a["warnings"] for a in log_analysis.values())
@@ -592,6 +587,7 @@ def print_summary(containers, processes, log_analysis, state_info=None):
     all_healthy = (
         healthy_containers == total_containers
         and healthy_processes == total_processes
+        and healthy_tools == total_tools
         and log_errors == 0
         and state_consistent
     )
@@ -604,7 +600,11 @@ def print_summary(containers, processes, log_analysis, state_info=None):
         )
     elif log_errors > 0:
         overall_status = f"{Color.RED}✗ DEGRADED (errors detected){Color.NC}"
-    elif healthy_containers < total_containers or healthy_processes < total_processes:
+    elif (
+        healthy_containers < total_containers
+        or healthy_processes < total_processes
+        or healthy_tools < total_tools
+    ):
         overall_status = f"{Color.RED}✗ DEGRADED (services down){Color.NC}"
     else:
         overall_status = f"{Color.YELLOW}⚠ WARNING (check logs){Color.NC}"
@@ -623,6 +623,7 @@ def print_summary(containers, processes, log_analysis, state_info=None):
 
     print(f"  Containers:    {healthy_containers}/{total_containers} running")
     print(f"  Processes:     {healthy_processes}/{total_processes} running")
+    print(f"  Tool Servers:  {healthy_tools}/{total_tools} healthy")
     print(
         f"  Log Issues:    {Color.RED if log_errors > 0 else ''}{log_errors} errors{Color.NC}, "
         f"{Color.YELLOW if log_warnings > 0 else ''}{log_warnings} warnings{Color.NC}"
@@ -658,7 +659,7 @@ def main():
         print_processes(processes)
         print_tool_servers(tool_servers)
         print_log_health(log_analysis)
-        print_summary(containers, processes, log_analysis, state_info)
+        print_summary(containers, processes, log_analysis, state_info, tool_servers)
 
         print(f"\n{Color.BOLD}{Color.CYAN}{'=' * 80}{Color.NC}\n")
 

@@ -42,3 +42,6 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # Configuration
 olorin-config = { path = "../../libs/config-rs" }
+
+# State management
+olorin-state = { path = "../../libs/state-rs" }

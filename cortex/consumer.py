@@ -498,6 +498,78 @@ class ExoConsumer:
             logger.warning("Context enrichment will be disabled")
             self.context_store = None
 
+    def _get_manual_context_documents(self) -> list[dict]:
+        """
+        Get manually selected context documents from context_documents table.
+
+        These are documents the user manually added via the chat search interface.
+        They persist until the user removes them (they are not auto-cleared).
+
+        Returns:
+            List of context dicts in the same format as ContextStore:
+            {'content': str, 'source': str|None, 'id': str, ...}
+        """
+        thread_name = threading.current_thread().name
+
+        if not self.config.context_db_path:
+            return []
+
+        try:
+            import sqlite3
+
+            # Use the same context.db but different table
+            conn = sqlite3.connect(self.config.context_db_path)
+            conn.row_factory = sqlite3.Row
+
+            # Check if table exists
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='context_documents'"
+            )
+            if cursor.fetchone() is None:
+                conn.close()
+                return []
+
+            # Fetch all manual context documents
+            cursor = conn.execute(
+                """
+                SELECT id, text, source, added_at
+                FROM context_documents
+                ORDER BY added_at ASC
+                """
+            )
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                return []
+
+            # Convert to ContextStore-compatible format
+            manual_contexts = []
+            for row in rows:
+                manual_contexts.append(
+                    {
+                        "id": row["id"],
+                        "content": row["text"],
+                        "source": row["source"],
+                        "h1": None,
+                        "h2": None,
+                        "h3": None,
+                        "chunk_index": None,
+                        "distance": None,  # Manual context has no distance score
+                        "added_at": row["added_at"],
+                        "is_manual": True,  # Flag to distinguish from auto context
+                    }
+                )
+
+            logger.info(
+                f"[{thread_name}] Retrieved {len(manual_contexts)} manual context document(s)"
+            )
+            return manual_contexts
+
+        except Exception as e:
+            logger.warning(f"[{thread_name}] Failed to get manual context: {e}")
+            return []
+
     def _init_chat_store(self):
         """Initialize chat store for conversation history management"""
         logger.info(f"Initializing chat store at {self.config.chat_db_path}...")
@@ -512,6 +584,78 @@ class ExoConsumer:
             logger.warning(f"Failed to initialize chat store: {e}")
             logger.warning("Chat history will be disabled")
             self.chat_store = None
+
+    def _start_processing_notices(
+        self, cancel_event: threading.Event, message_id: str, thread_name: str
+    ) -> threading.Thread:
+        """
+        Start a background thread that sends periodic "Processing" notices.
+
+        The first notice is sent immediately, then subsequent notices are sent
+        with increasing delays: 10s -> 12s -> 14.4s -> ... up to max 20s.
+        The delay grows by 20% each time.
+
+        Args:
+            cancel_event: Event to signal when to stop sending notices
+            message_id: The message ID for tagging notices
+            thread_name: Thread name for logging
+
+        Returns:
+            The background thread (already started)
+        """
+
+        def notice_sender():
+            notice_count = 0
+            delay = 10.0  # Initial delay in seconds
+            max_delay = 20.0
+            growth_factor = 1.2  # 20% increase
+
+            # Send first notice immediately
+            notice_count += 1
+            processing_message = {
+                "text": "Processing, one moment...",
+                "id": f"{message_id}_processing_{notice_count}",
+                "prompt_id": message_id,
+                "is_processing_notice": True,
+                "timestamp": datetime.now().isoformat(),
+            }
+            logger.info(f"[{thread_name}] 📣 Sending processing notice #{notice_count}")
+            self.producer.send(self.config.kafka_output_topic, value=processing_message)
+
+            # Continue sending notices with increasing delays until cancelled
+            while not cancel_event.is_set():
+                # Wait for the delay, but check for cancellation
+                if cancel_event.wait(timeout=delay):
+                    # Event was set, stop sending notices
+                    logger.info(
+                        f"[{thread_name}] ✓ Processing notices cancelled after {notice_count} notice(s)"
+                    )
+                    return
+
+                # Send another notice
+                notice_count += 1
+                processing_message = {
+                    "text": "Processing, please wait...",
+                    "id": f"{message_id}_processing_{notice_count}",
+                    "prompt_id": message_id,
+                    "is_processing_notice": True,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                logger.info(
+                    f"[{thread_name}] 📣 Sending processing notice #{notice_count} (next in {min(delay * growth_factor, max_delay):.1f}s)"
+                )
+                self.producer.send(
+                    self.config.kafka_output_topic, value=processing_message
+                )
+
+                # Increase delay for next time, capped at max
+                delay = min(delay * growth_factor, max_delay)
+
+        thread = threading.Thread(
+            target=notice_sender, name=f"{thread_name}-notice-sender", daemon=True
+        )
+        thread.start()
+        return thread
 
     def _is_reset_command(self, prompt: str) -> bool:
         """Check if the prompt is a conversation reset command."""
@@ -681,25 +825,50 @@ class ExoConsumer:
 
         Args:
             context_chunks: List of context dicts with 'content', 'source', etc.
+                           May include 'is_manual' flag to distinguish manually selected context.
 
         Returns:
             List of two message dicts [user_msg, assistant_msg]
         """
-        # Build context block from chunks
-        context_parts = []
-        for i, ctx in enumerate(context_chunks):
-            source_parts = []
-            if ctx.get("source"):
-                source_parts.append(ctx["source"])
-            if ctx.get("h1"):
-                source_parts.append(ctx["h1"])
-            if ctx.get("h2"):
-                source_parts.append(ctx["h2"])
-            if ctx.get("h3"):
-                source_parts.append(ctx["h3"])
+        # Separate manual and auto context for clearer presentation
+        manual_chunks = [c for c in context_chunks if c.get("is_manual")]
+        auto_chunks = [c for c in context_chunks if not c.get("is_manual")]
 
-            source_ref = " > ".join(source_parts) if source_parts else f"Source {i + 1}"
-            context_parts.append(f"### {source_ref}\n{ctx['content']}")
+        context_parts = []
+
+        # Format manual context first (user-selected)
+        if manual_chunks:
+            context_parts.append("## Selected Context (manually chosen)")
+            for i, ctx in enumerate(manual_chunks):
+                source_parts = []
+                if ctx.get("source"):
+                    source_parts.append(ctx["source"])
+                source_ref = (
+                    " > ".join(source_parts)
+                    if source_parts
+                    else f"Selected document {i + 1}"
+                )
+                context_parts.append(f"### {source_ref}\n{ctx['content']}")
+
+        # Format auto context (RAG-retrieved)
+        if auto_chunks:
+            if manual_chunks:
+                context_parts.append("\n## Retrieved Context (automatically found)")
+            for i, ctx in enumerate(auto_chunks):
+                source_parts = []
+                if ctx.get("source"):
+                    source_parts.append(ctx["source"])
+                if ctx.get("h1"):
+                    source_parts.append(ctx["h1"])
+                if ctx.get("h2"):
+                    source_parts.append(ctx["h2"])
+                if ctx.get("h3"):
+                    source_parts.append(ctx["h3"])
+
+                source_ref = (
+                    " > ".join(source_parts) if source_parts else f"Source {i + 1}"
+                )
+                context_parts.append(f"### {source_ref}\n{ctx['content']}")
 
         context_block = "\n\n".join(context_parts)
 
@@ -821,13 +990,43 @@ When you decide to use a tool, call it with the required parameters. After the t
             history = self.chat_store.get_conversation_messages(conversation_id)
             logger.info(f"[{thread_name}] Retrieved {len(history)} historical messages")
 
+            # Extract context IDs already injected in this conversation
+            # This prevents re-injecting manual context that's already in history
+            already_injected_ids = set()
+            for msg in history:
+                if msg.get("message_type") == "context_user":
+                    metadata = msg.get("metadata", {})
+                    if isinstance(metadata, dict):
+                        ctx_ids = metadata.get("context_ids", [])
+                        if ctx_ids:
+                            already_injected_ids.update(ctx_ids)
+
+            if already_injected_ids:
+                logger.info(
+                    f"[{thread_name}] Found {len(already_injected_ids)} already-injected context IDs"
+                )
+
             # Add historical messages
             for msg in history:
                 messages.append({"role": msg["role"], "content": msg["content"]})
 
-            # Add context injection (if RAG context available)
+            # Filter context_chunks to only include NEW context (not already in history)
+            new_context_chunks = None
             if context_chunks:
-                context_exchange = self._format_context_as_exchange(context_chunks)
+                new_context_chunks = [
+                    ctx
+                    for ctx in context_chunks
+                    if ctx.get("id") not in already_injected_ids
+                ]
+                filtered_count = len(context_chunks) - len(new_context_chunks)
+                if filtered_count > 0:
+                    logger.info(
+                        f"[{thread_name}] Filtered out {filtered_count} already-injected context chunks"
+                    )
+
+            # Add context injection (only NEW context not already in history)
+            if new_context_chunks:
+                context_exchange = self._format_context_as_exchange(new_context_chunks)
                 messages.extend(context_exchange)
                 logger.info(
                     f"[{thread_name}] Injected RAG context as user/assistant exchange"
@@ -837,21 +1036,22 @@ When you decide to use a tool, call it with the required parameters. After the t
                 # This ensures the LLM has access to context in subsequent turns
                 try:
                     # Build metadata with context chunk info for audit trail
+                    # Use new_context_chunks (filtered) to track what was actually injected
                     context_metadata = {
                         "context_ids": [
-                            ctx.get("id") for ctx in context_chunks if ctx.get("id")
+                            ctx.get("id") for ctx in new_context_chunks if ctx.get("id")
                         ],
                         "sources": [
                             ctx.get("source")
-                            for ctx in context_chunks
+                            for ctx in new_context_chunks
                             if ctx.get("source")
                         ],
                         "distances": [
                             ctx.get("distance")
-                            for ctx in context_chunks
+                            for ctx in new_context_chunks
                             if ctx.get("distance") is not None
                         ],
-                        "chunk_count": len(context_chunks),
+                        "chunk_count": len(new_context_chunks),
                     }
                     self.chat_store.add_user_message(
                         conversation_id,
@@ -885,7 +1085,7 @@ When you decide to use a tool, call it with the required parameters. After the t
                 f"[{thread_name}] Built messages array with {len(messages)} total messages"
             )
             logger.info(
-                f"[{thread_name}]   - System: {1 if tool_system_prompt else 0}, History: {len(history)}, Context exchange: {2 if context_chunks else 0}, New prompt: 1"
+                f"[{thread_name}]   - System: {1 if tool_system_prompt else 0}, History: {len(history)}, Context exchange: {2 if new_context_chunks else 0}, New prompt: 1"
             )
             return messages
 
@@ -1191,6 +1391,9 @@ User's question: {prompt}"""
         # Initialize thinking block state for this message
         in_thinking = False
 
+        # Initialize processing notice event (will be set when notices start)
+        processing_cancel_event = None
+
         try:
             # Parse message
             logger.info(f"[{thread_name}] STEP 1/6: Parsing message format...")
@@ -1289,20 +1492,31 @@ User's question: {prompt}"""
             logger.info(
                 f"[{thread_name}] STEP 2/6: Building messages with conversation history..."
             )
-            context_chunks = None
-            context_count = 0
+
+            # First, always check for manually selected context documents
+            # These are documents the user added via the search interface
+            manual_context = self._get_manual_context_documents()
+            manual_count = len(manual_context) if manual_context else 0
+            if manual_count > 0:
+                logger.info(
+                    f"[{thread_name}] 📋 Found {manual_count} manually selected context document(s)"
+                )
+
+            # Then check for automatic RAG context from enrichener
+            auto_context = []
+            auto_count = 0
             if context_available and contexts_stored > 0:
                 logger.info(
-                    f"[{thread_name}] 📚 Context available! Retrieving {contexts_stored} context chunks..."
+                    f"[{thread_name}] 📚 Auto context available! Retrieving {contexts_stored} context chunks..."
                 )
                 if self.context_store is not None:
-                    context_chunks = self.context_store.get_contexts_for_prompt(
+                    auto_context = self.context_store.get_contexts_for_prompt(
                         message_id
                     )
-                    context_count = len(context_chunks) if context_chunks else 0
-                    if context_count > 0:
+                    auto_count = len(auto_context) if auto_context else 0
+                    if auto_count > 0:
                         logger.info(
-                            f"[{thread_name}] ✓ Retrieved {context_count} context chunks for RAG injection"
+                            f"[{thread_name}] ✓ Retrieved {auto_count} auto context chunks for RAG injection"
                         )
                     else:
                         logger.warning(
@@ -1310,30 +1524,37 @@ User's question: {prompt}"""
                         )
                 else:
                     logger.warning(
-                        f"[{thread_name}] ⚠ Context store not available, skipping context retrieval"
+                        f"[{thread_name}] ⚠ Context store not available, skipping auto context retrieval"
                     )
             else:
                 logger.info(
-                    f"[{thread_name}] No context enrichment needed (context_available={context_available})"
+                    f"[{thread_name}] No auto context enrichment needed (context_available={context_available})"
+                )
+
+            # Combine manual and automatic context (manual first, then auto)
+            context_chunks = []
+            if manual_context:
+                context_chunks.extend(manual_context)
+            if auto_context:
+                context_chunks.extend(auto_context)
+
+            context_count = len(context_chunks)
+            if context_count > 0:
+                logger.info(
+                    f"[{thread_name}] 📚 Total context: {context_count} chunks (manual: {manual_count}, auto: {auto_count})"
                 )
 
             # Build messages array with conversation history
             messages = self._build_messages_with_history(
-                prompt, message_id, context_chunks
+                prompt, message_id, context_chunks if context_chunks else None
             )
 
-            # Send "Processing" notification to Broca so user knows something is happening
-            processing_message = {
-                "text": "Processing, one moment...",
-                "id": f"{message_id}_processing",
-                "prompt_id": message_id,
-                "is_processing_notice": True,
-                "timestamp": datetime.now().isoformat(),
-            }
-            logger.info(
-                f"[{thread_name}] 📣 Sending 'Processing, one moment...' notice to Broca"
+            # Start periodic "Processing" notifications to Broca so user knows something is happening
+            # Notices are sent with increasing delays: immediate, then 10s, 12s, 14.4s, ... up to 20s max
+            processing_cancel_event = threading.Event()
+            self._start_processing_notices(
+                processing_cancel_event, message_id, thread_name
             )
-            self.producer.send(self.config.kafka_output_topic, value=processing_message)
 
             # Determine model to use - either from config or auto-detect
             logger.info(f"[{thread_name}] STEP 3/6: Determining which model to use...")
@@ -1498,6 +1719,8 @@ User's question: {prompt}"""
                             logger.info(
                                 f"[{thread_name}] ⚡ First chunk received in {time_to_first_chunk:.2f}s"
                             )
+                            # Cancel the periodic processing notices now that we have a response
+                            processing_cancel_event.set()
 
                         # Accumulate clean text for display (excluding thinking blocks)
                         if not in_thinking:
@@ -1927,6 +2150,11 @@ User's question: {prompt}"""
                     exc_info=True,
                 )
             logger.error("✗" * 60)
+
+        finally:
+            # Ensure processing notices are cancelled
+            if processing_cancel_event is not None:
+                processing_cancel_event.set()
 
     def _process_message_wrapper(self, message_value, message_count, message_metadata):
         """Wrapper to process message in a worker thread"""
