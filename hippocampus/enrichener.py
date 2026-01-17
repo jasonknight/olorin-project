@@ -18,8 +18,6 @@ import re
 import sys
 import time
 from datetime import datetime
-from openai import OpenAI
-import requests
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import chromadb
@@ -29,6 +27,7 @@ from chromadb.config import Settings
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
 from libs.embeddings import get_embedder
+from libs.inference import get_inference_client
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
 from libs.persistent_log import get_persistent_log
@@ -209,8 +208,11 @@ class PromptEnricher:
         # Initialize embedding model
         self._init_embedding_model()
 
-        # Initialize OpenAI client pointing to Exo
-        self.client = self._init_openai_client()
+        # Initialize inference client (centralized LLM access)
+        self.inference = get_inference_client()
+        logger.info(
+            f"Inference client initialized (backend: {self.inference.backend_type.value})"
+        )
 
         # Initialize thread pool for message processing
         self.executor = ThreadPoolExecutor(
@@ -330,105 +332,15 @@ class PromptEnricher:
             logger.error(f"Failed to initialize embedder: {e}", exc_info=True)
             raise
 
-    def _init_openai_client(self):
-        """Initialize OpenAI client pointing to Exo"""
-        logger.info(
-            f"Initializing OpenAI client for Exo at {self.config.exo_base_url}..."
-        )
-        client = OpenAI(
-            base_url=self.config.exo_base_url, api_key=self.config.exo_api_key
-        )
-        logger.info("OpenAI client initialized successfully")
-        return client
-
-    def _get_running_model(self) -> str | None:
-        """Query Exo to get the currently running model"""
-        thread_name = threading.current_thread().name
-        logger.info(f"[{thread_name}] Auto-detecting running model from Exo...")
-
-        try:
-            base_url = self.config.exo_base_url.rstrip("/v1").rstrip("/")
-            state_url = f"{base_url}/state"
-            logger.debug(f"[{thread_name}] Querying: {state_url}")
-
-            response = requests.get(state_url, timeout=5)
-            response.raise_for_status()
-            state = response.json()
-
-            instances = state.get("instances", {})
-            runners = state.get("runners", {})
-            logger.debug(f"[{thread_name}] Found {len(instances)} instance(s)")
-
-            if not instances:
-                logger.warning(f"[{thread_name}] No instances in state")
-                return None
-
-            # Check each instance for a ready model
-            for instance_id, instance_wrapper in instances.items():
-                if isinstance(instance_wrapper, dict):
-                    for variant_name, instance_data in instance_wrapper.items():
-                        if isinstance(instance_data, dict):
-                            shard_assignments = instance_data.get(
-                                "shardAssignments", {}
-                            )
-                            model_id = shard_assignments.get("modelId")
-                            runner_to_shard = shard_assignments.get("runnerToShard", {})
-
-                            if not model_id:
-                                continue
-
-                            # Check if all runners are ready
-                            all_ready = True
-                            for runner_id in runner_to_shard.keys():
-                                runner_status = runners.get(runner_id, {})
-                                if isinstance(runner_status, dict):
-                                    status_type = (
-                                        next(iter(runner_status.keys()))
-                                        if runner_status
-                                        else None
-                                    )
-                                    if status_type not in [
-                                        "RunnerReady",
-                                        "RunnerRunning",
-                                    ]:
-                                        all_ready = False
-                                        break
-
-                            if all_ready and runner_to_shard:
-                                logger.info(
-                                    f"[{thread_name}] Auto-detected model: {model_id}"
-                                )
-                                return model_id
-
-            logger.warning(f"[{thread_name}] No ready model found")
-            return None
-
-        except requests.exceptions.Timeout:
-            logger.error(f"[{thread_name}] Timeout querying Exo state")
-            return None
-        except requests.exceptions.ConnectionError:
-            logger.error(f"[{thread_name}] Connection error - is Exo running?")
-            return None
-        except Exception as e:
-            logger.error(f"[{thread_name}] Failed to query Exo state: {e}")
-            return None
-
     def _check_config_reload(self):
-        """Check if .env has changed and reload configuration if needed"""
-        old_exo_base_url = self.config.exo_base_url
-        old_exo_api_key = self.config.exo_api_key
-
+        """Check if config has changed and reload if needed"""
         if self.config.reload():
-            logger.info("Detected .env file change, reloading configuration...")
-
-            # Check if Exo settings changed
-            if (
-                self.config.exo_base_url != old_exo_base_url
-                or self.config.exo_api_key != old_exo_api_key
-            ):
-                logger.info("Exo settings changed, reinitializing client...")
-                self.client = self._init_openai_client()
-
+            logger.info("Detected config file change, reloading configuration...")
+            # Inference client handles its own reload
+            if self.inference.reload():
+                logger.info(
+                    f"Inference client reloaded (backend: {self.inference.backend_type.value})"
+                )
             logger.info("Configuration reloaded successfully")
 
     # =========================================================================
@@ -446,15 +358,8 @@ class PromptEnricher:
         logger.info(f"[{thread_name}] Deciding if prompt needs enrichment...")
 
         try:
-            model_to_use = self.config.model_name or self._get_running_model()
-            if not model_to_use:
-                logger.warning(
-                    f"[{thread_name}] No model available, assuming enrichment needed"
-                )
-                return True
-
-            response = self.client.chat.completions.create(
-                model=model_to_use,
+            # Use centralized inference client
+            response = self.inference.complete(
                 messages=[
                     {"role": "system", "content": DECISION_SYSTEM_PROMPT},
                     {
@@ -466,7 +371,8 @@ class PromptEnricher:
                 timeout=self.config.llm_timeout_seconds,
             )
 
-            raw_answer = response.choices[0].message.content.strip()
+            raw_answer = response.content.strip()
+            model_to_use = self.inference.get_running_model() or "unknown"
 
             # Log the LLM decision response to persistent log
             plog = get_persistent_log()

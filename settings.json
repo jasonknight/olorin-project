@@ -5,6 +5,12 @@
   "state": {
     "db_path": "./data/state.db"
   },
+  "inference": {
+    "backend": "exo",
+    "timeout": 120,
+    "retry_count": 3,
+    "retry_delay": 1.0
+  },
   "kafka": {
     "bootstrap_servers": "localhost:9092",
     "send_timeout": 10,
@@ -13,6 +19,12 @@
   "exo": {
     "base_url": "http://localhost:52415/v1",
     "api_key": "dummy-key",
+    "model_name": null,
+    "temperature": 0.7,
+    "max_tokens": null
+  },
+  "ollama": {
+    "base_url": "http://localhost:11434",
     "model_name": null,
     "temperature": 0.7,
     "max_tokens": null

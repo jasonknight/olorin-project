@@ -5,8 +5,6 @@ import json
 import os
 import sys
 from datetime import datetime
-from openai import OpenAI
-import requests
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import re
@@ -14,6 +12,7 @@ import re
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from libs.config import Config
+from libs.inference import get_inference_client
 from libs.olorin_logging import OlorinLogger
 from libs.context_store import ContextStore
 from libs.chat_store import ChatStore
@@ -313,8 +312,11 @@ class ExoConsumer:
             logger.error(f"Failed to create Kafka producer: {e}", exc_info=True)
             raise
 
-        # Initialize OpenAI client pointing to exo
-        self.client = self._init_openai_client(config)
+        # Initialize inference client (centralized LLM access)
+        self.inference = get_inference_client()
+        logger.info(
+            f"Inference client initialized (backend: {self.inference.backend_type.value})"
+        )
 
         # Initialize context store for reading enriched contexts
         self._init_context_store()
@@ -351,91 +353,6 @@ class ExoConsumer:
         logger.info(f"  Exo endpoint: {config.exo_base_url}")
         logger.info(f"  Model: {config.model_name}")
 
-    def _init_openai_client(self, config: CortexConfig):
-        """Initialize or reinitialize the OpenAI client"""
-        logger.info(f"Initializing OpenAI client for exo at {config.exo_base_url}...")
-        client = OpenAI(base_url=config.exo_base_url, api_key=config.exo_api_key)
-        logger.info("OpenAI client initialized successfully")
-        return client
-
-    def _detect_tool_call_support(self) -> bool:
-        """
-        Detect if the current model and API endpoint support tool calls.
-
-        Uses a minimal test call with a dummy tool definition to probe support.
-        This is necessary because:
-        1. Exo does not expose tool capabilities via /models or /state endpoints
-        2. OpenAI-compatible APIs vary in tool support by model and implementation
-
-        Returns:
-            bool: True if tool calls are supported, False otherwise
-        """
-        thread_name = threading.current_thread().name
-        logger.info(f"[{thread_name}] Detecting tool call support...")
-
-        try:
-            # Get the model to test with
-            model_to_use = self.config.model_name
-            if not model_to_use:
-                model_to_use = self._get_running_model()
-                if not model_to_use:
-                    logger.warning(
-                        f"[{thread_name}] No model available for tool detection"
-                    )
-                    return False
-
-            # Define a minimal dummy tool for testing
-            test_tool = {
-                "type": "function",
-                "function": {
-                    "name": "test_tool_support",
-                    "description": "A test function to detect tool support",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "test": {"type": "string", "description": "Test parameter"}
-                        },
-                        "required": [],
-                    },
-                },
-            }
-
-            # Make a minimal test call - we don't need a real response
-            # Just checking if the API accepts tools parameter
-            self.client.chat.completions.create(
-                model=model_to_use,
-                messages=[{"role": "user", "content": "test"}],
-                tools=[test_tool],
-                max_tokens=1,  # Minimize token usage
-                timeout=10,  # Quick timeout for detection
-            )
-
-            # If we get here without error, tools are supported
-            logger.info(
-                f"[{thread_name}] Tool call support DETECTED for model {model_to_use}"
-            )
-            return True
-
-        except Exception as e:
-            error_msg = str(e).lower()
-            # Check for specific error messages that indicate tools not supported
-            if any(
-                indicator in error_msg
-                for indicator in [
-                    "tools",
-                    "function",
-                    "not supported",
-                    "invalid",
-                    "unknown parameter",
-                ]
-            ):
-                logger.info(f"[{thread_name}] Tool calls NOT supported: {e}")
-            else:
-                logger.warning(
-                    f"[{thread_name}] Tool detection failed with unexpected error: {e}"
-                )
-            return False
-
     def check_tool_support(self, force_redetect: bool = False) -> bool:
         """
         Check if tool calls are supported by the current model/endpoint.
@@ -458,14 +375,12 @@ class ExoConsumer:
             )
             return self._tools_supported
 
-        # Perform detection
-        self._tools_supported = self._detect_tool_call_support()
+        # Delegate detection to centralized inference client
+        self._tools_supported = self.inference.supports_tools()
 
         # Store result in state.db for cross-component visibility
         try:
-            model_name = (
-                self.config.model_name or self._get_running_model() or "unknown"
-            )
+            model_name = self.inference.get_running_model() or "unknown"
             self._state.set_bool("cortex.tools_supported", self._tools_supported)
             self._state.set_string("cortex.tools_model", model_name)
             self._state.set_string(
@@ -697,123 +612,6 @@ class ExoConsumer:
         except Exception as e:
             logger.error(f"[{thread_name}] Failed to reset conversation: {e}")
             return False
-
-    def _get_running_model(self) -> str | None:
-        """Query exo to get the currently running model from instances with ready runners"""
-        thread_name = threading.current_thread().name
-        logger.info(f"[{thread_name}] ▶ Auto-detecting running model from exo...")
-
-        try:
-            # Remove /v1 from base_url to get the state endpoint
-            base_url = self.config.exo_base_url.rstrip("/v1").rstrip("/")
-            state_url = f"{base_url}/state"
-            logger.info(f"[{thread_name}] Querying exo state endpoint: {state_url}")
-
-            logger.debug(f"[{thread_name}] Sending HTTP GET request...")
-            response = requests.get(state_url, timeout=5)
-            logger.debug(
-                f"[{thread_name}] Response status code: {response.status_code}"
-            )
-            response.raise_for_status()
-
-            logger.debug(f"[{thread_name}] Parsing JSON response...")
-            state = response.json()
-            logger.debug(f"[{thread_name}] State keys: {list(state.keys())}")
-
-            # Log the FULL raw response from the server
-            logger.info(f"[{thread_name}] 📋 FULL STATE ENDPOINT RESPONSE:")
-            logger.info(f"[{thread_name}] {json.dumps(state, indent=2)}")
-
-            # Extract instances and runners from state
-            instances = state.get("instances", {})
-            runners = state.get("runners", {})
-            logger.info(
-                f"[{thread_name}] Found {len(instances)} instance(s) and {len(runners)} runner(s) in exo state"
-            )
-
-            if not instances:
-                logger.warning(
-                    f"[{thread_name}] No instances in state - exo may not be running"
-                )
-                return None
-
-            # Check each instance and verify its runners are ready
-            for instance_id, instance_wrapper in instances.items():
-                logger.debug(f"[{thread_name}] Checking instance: {instance_id}")
-                if isinstance(instance_wrapper, dict):
-                    # Instance is wrapped in a variant tag (MlxRingInstance, etc.)
-                    for variant_name, instance_data in instance_wrapper.items():
-                        logger.debug(f"[{thread_name}]   Variant: {variant_name}")
-                        if isinstance(instance_data, dict):
-                            shard_assignments = instance_data.get(
-                                "shardAssignments", {}
-                            )
-                            model_id = shard_assignments.get("modelId")
-                            runner_to_shard = shard_assignments.get("runnerToShard", {})
-
-                            logger.debug(f"[{thread_name}]   Model ID: {model_id}")
-                            logger.debug(
-                                f"[{thread_name}]   Runners: {list(runner_to_shard.keys())}"
-                            )
-
-                            if not model_id:
-                                continue
-
-                            # Check if all runners for this instance are ready
-                            all_runners_ready = True
-                            for runner_id in runner_to_shard.keys():
-                                runner_status = runners.get(runner_id, {})
-                                # Runner status is also a tagged union, e.g. {"RunnerReady": {}}
-                                status_type = None
-                                if isinstance(runner_status, dict):
-                                    # Get the tag (e.g., "RunnerReady", "RunnerRunning", etc.)
-                                    status_type = (
-                                        next(iter(runner_status.keys()))
-                                        if runner_status
-                                        else None
-                                    )
-
-                                logger.debug(
-                                    f"[{thread_name}]   Runner {runner_id} status: {status_type}"
-                                )
-
-                                # A model is ready if all its runners are in RunnerReady or RunnerRunning state
-                                if status_type not in ["RunnerReady", "RunnerRunning"]:
-                                    all_runners_ready = False
-                                    logger.debug(
-                                        f"[{thread_name}]   ✗ Runner {runner_id} not ready (status: {status_type})"
-                                    )
-                                    break
-
-                            if all_runners_ready and runner_to_shard:
-                                logger.info(
-                                    f"[{thread_name}] ✓ Auto-detected READY model: {model_id}"
-                                )
-                                logger.info(
-                                    f"[{thread_name}]   All {len(runner_to_shard)} runner(s) are ready"
-                                )
-                                return model_id
-                            elif model_id:
-                                logger.info(
-                                    f"[{thread_name}] ⏳ Found model {model_id} but runners not all ready yet"
-                                )
-
-            logger.warning(
-                f"[{thread_name}] ✗ No ready model found in {len(instances)} instance(s)"
-            )
-            return None
-
-        except requests.exceptions.Timeout as e:
-            logger.error(f"[{thread_name}] ✗ Timeout querying exo state endpoint: {e}")
-            return None
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"[{thread_name}] ✗ Connection error - is exo running?: {e}")
-            return None
-        except Exception as e:
-            logger.error(
-                f"[{thread_name}] ✗ Failed to query exo state: {type(e).__name__}: {e}"
-            )
-            return None
 
     def _format_context_as_exchange(self, context_chunks: list[dict]) -> list[dict]:
         """
@@ -1319,27 +1117,21 @@ User's question: {prompt}"""
         return results
 
     def _check_config_reload(self):
-        """Check if .env has changed and reload configuration if needed"""
-        logger.debug("Checking for .env file changes...")
+        """Check if config has changed and reload if needed"""
+        logger.debug("Checking for config file changes...")
 
-        old_exo_base_url = self.config.exo_base_url
-        old_exo_api_key = self.config.exo_api_key
         old_model_name = self.config.model_name
         old_temperature = self.config.temperature
         old_max_tokens = self.config.max_tokens
 
         if self.config.reload():
-            logger.info("Detected .env file change, reloading configuration...")
+            logger.info("Detected config file change, reloading configuration...")
 
-            # Check if exo settings changed
-            if (
-                self.config.exo_base_url != old_exo_base_url
-                or self.config.exo_api_key != old_exo_api_key
-            ):
-                logger.info("Exo settings changed, reinitializing client...")
-                logger.info(f"  Old base URL: {old_exo_base_url}")
-                logger.info(f"  New base URL: {self.config.exo_base_url}")
-                self.client = self._init_openai_client(self.config)
+            # Inference client handles its own reload
+            if self.inference.reload():
+                logger.info(
+                    f"Inference client reloaded (backend: {self.inference.backend_type.value})"
+                )
 
             # Log other important changes
             if self.config.model_name != old_model_name:
@@ -1353,19 +1145,15 @@ User's question: {prompt}"""
                     f"Temperature changed: {old_temperature} -> {self.config.temperature}"
                 )
             if self.config.max_tokens != old_max_tokens:
-                old_tokens = old_max_tokens if old_max_tokens else "exo default"
+                old_tokens = old_max_tokens if old_max_tokens else "default"
                 new_tokens = (
-                    self.config.max_tokens if self.config.max_tokens else "exo default"
+                    self.config.max_tokens if self.config.max_tokens else "default"
                 )
                 logger.info(f"Max tokens changed: {old_tokens} -> {new_tokens}")
 
-            # Re-detect tool support when endpoint or model changes
-            if (
-                self.config.exo_base_url != old_exo_base_url
-                or self.config.exo_api_key != old_exo_api_key
-                or self.config.model_name != old_model_name
-            ):
-                logger.info("Re-detecting tool support after endpoint/model change...")
+            # Re-detect tool support when model changes
+            if self.config.model_name != old_model_name:
+                logger.info("Re-detecting tool support after model change...")
                 self._tools_supported = None  # Clear cache
                 tools_supported = self.check_tool_support(force_redetect=True)
                 # Re-discover tools if supported
@@ -1377,7 +1165,7 @@ User's question: {prompt}"""
 
             logger.info("Configuration reloaded successfully")
         else:
-            logger.debug("No .env file changes detected")
+            logger.debug("No config file changes detected")
 
     def process_message(self, message):
         """Process a single prompt message and send to exo"""
@@ -1560,19 +1348,14 @@ User's question: {prompt}"""
             logger.info(f"[{thread_name}] STEP 3/6: Determining which model to use...")
             model_to_use = self.config.model_name
             if not model_to_use:
-                logger.info(
-                    f"[{thread_name}] No model in config, auto-detecting from exo..."
-                )
-                logger.info(
-                    f"[{thread_name}] Querying exo state endpoint for running model..."
-                )
-                model_to_use = self._get_running_model()
+                logger.info(f"[{thread_name}] No model in config, auto-detecting...")
+                model_to_use = self.inference.get_running_model()
                 if not model_to_use:
                     logger.error(
                         f"[{thread_name}] ✗ Auto-detection failed: no running model found"
                     )
                     raise ValueError(
-                        "No model specified in config and no running instances found in exo"
+                        "No model specified in config and no running instances found"
                     )
                 logger.info(f"[{thread_name}] ✓ Auto-detected model: {model_to_use}")
             else:
@@ -1580,14 +1363,16 @@ User's question: {prompt}"""
                     f"[{thread_name}] ✓ Using model from config: {model_to_use}"
                 )
 
-            # Call exo using OpenAI SDK
-            logger.info(f"[{thread_name}] STEP 4/6: Calling exo AI inference API...")
+            # Call inference backend
+            logger.info(f"[{thread_name}] STEP 4/6: Calling AI inference API...")
             logger.info(f"[{thread_name}] API Configuration:")
-            logger.info(f"[{thread_name}]   Endpoint: {self.config.exo_base_url}")
+            logger.info(
+                f"[{thread_name}]   Backend: {self.inference.backend_type.value}"
+            )
             logger.info(f"[{thread_name}]   Model: {model_to_use}")
             logger.info(f"[{thread_name}]   Temperature: {self.config.temperature}")
             logger.info(
-                f"[{thread_name}]   Max tokens: {self.config.max_tokens if self.config.max_tokens else 'exo default'}"
+                f"[{thread_name}]   Max tokens: {self.config.max_tokens if self.config.max_tokens else 'default'}"
             )
             logger.info(
                 f"[{thread_name}] ⏳ Waiting for AI inference (this may take a while)..."
@@ -1614,7 +1399,8 @@ User's question: {prompt}"""
                 logger.info(f"[{thread_name}] 🔧 Tools enabled: {tool_names}")
 
             logger.info(f"[{thread_name}] 🌊 Starting STREAMING API call...")
-            stream = self.client.chat.completions.create(**api_params)
+            # Access underlying client for raw streaming (complex processing requires OpenAI format)
+            stream = self.inference.backend.client.chat.completions.create(**api_params)
 
             # Process streaming response
             logger.info(f"[{thread_name}] STEP 5/6: Processing streaming response...")
@@ -1969,23 +1755,16 @@ User's question: {prompt}"""
                 logger.info(
                     f"[{thread_name}] 🔄 Making follow-up API call with tool results..."
                 )
-                follow_up_params = {
-                    "model": model_to_use,
-                    "messages": messages,
-                    "temperature": self.config.temperature,
-                }
-                if self.config.max_tokens is not None:
-                    follow_up_params["max_tokens"] = self.config.max_tokens
-                if self.available_tools:
-                    follow_up_params["tools"] = self.available_tools
-
                 try:
-                    follow_up_response = self.client.chat.completions.create(
-                        **follow_up_params
+                    # Use inference client for follow-up call
+                    follow_up_response = self.inference.complete(
+                        messages=messages,
+                        model=model_to_use,
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.max_tokens,
+                        tools=self.available_tools if self.available_tools else None,
                     )
-                    follow_up_content = (
-                        follow_up_response.choices[0].message.content or ""
-                    )
+                    follow_up_content = follow_up_response.content or ""
 
                     logger.info(
                         f"[{thread_name}] ✓ Follow-up response received ({len(follow_up_content)} chars)"

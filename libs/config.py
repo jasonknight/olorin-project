@@ -95,6 +95,16 @@ _KEY_TO_PATH = {
     "EMBEDDINGS_TOOL_MODEL": "tools.embeddings.model",
     "EMBEDDINGS_DOCUMENT_PREFIX": "tools.embeddings.document_prefix",
     "EMBEDDINGS_QUERY_PREFIX": "tools.embeddings.query_prefix",
+    # Inference (centralized LLM inference settings)
+    "INFERENCE_BACKEND": "inference.backend",
+    "INFERENCE_TIMEOUT": "inference.timeout",
+    "INFERENCE_RETRY_COUNT": "inference.retry_count",
+    "INFERENCE_RETRY_DELAY": "inference.retry_delay",
+    # Ollama (alternative inference backend)
+    "OLLAMA_BASE_URL": "ollama.base_url",
+    "OLLAMA_MODEL_NAME": "ollama.model_name",
+    "OLLAMA_TEMPERATURE": "ollama.temperature",
+    "OLLAMA_MAX_TOKENS": "ollama.max_tokens",
 }
 
 
