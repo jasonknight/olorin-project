@@ -11,9 +11,14 @@ import time
 import re
 import subprocess
 import argparse
+import json
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple
 from collections import Counter
+from datetime import datetime
+
+from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -60,6 +65,7 @@ class PDFTracker:
         ollama_threshold: float = 0.5,
         include_metadata: bool = True,
         force_reprocess_pattern: str = None,
+        notify_broca: bool = True,
     ):
         """
         Initialize PDF tracker.
@@ -77,6 +83,7 @@ class PDFTracker:
             ollama_threshold: Minimum relevance score (0-1) to include page
             include_metadata: Include YAML frontmatter with document metadata
             force_reprocess_pattern: Regex pattern to match filenames for forced reprocessing
+            notify_broca: Send TTS notification to Broca when processing starts
         """
         # Get paths from config if not provided
         config = Config()
@@ -112,6 +119,12 @@ class PDFTracker:
                     f"Invalid regex pattern: {force_reprocess_pattern} - {e}"
                 )
 
+        # Broca notification settings
+        self.notify_broca = notify_broca
+        self.broca_producer = None
+        self.broca_topic = config.get("BROCA_KAFKA_TOPIC", "ai_out")
+        self.kafka_servers = config.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
         # Setup logging
         default_log_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "logs"
@@ -138,6 +151,22 @@ class PDFTracker:
             self.logger.debug(
                 "macOS Vision OCR not available (install pyobjc-framework-Vision)"
             )
+
+        # Initialize Broca Kafka producer
+        if self.notify_broca:
+            try:
+                self.broca_producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_servers,
+                    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                    api_version_auto_timeout_ms=5000,
+                    retries=3,
+                )
+                self.logger.info(
+                    f"Broca notifications enabled (topic: {self.broca_topic})"
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not connect to Kafka for Broca: {e}")
+                self.broca_producer = None
 
         # Create directories if they don't exist
         os.makedirs(self.input_dir, exist_ok=True)
@@ -231,6 +260,88 @@ class PDFTracker:
                 return pull_result.returncode == 0
             return False
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            return False
+
+    def _guess_title_from_filename(self, filename: str) -> str:
+        """
+        Use Ollama to guess a clean title/author from the PDF filename.
+
+        Many PDF filenames contain extra info like dates, edition numbers,
+        scan info, etc. This uses an LLM to extract the likely title and author.
+
+        Args:
+            filename: The PDF filename (without path or extension)
+
+        Returns:
+            A clean, speakable title string (e.g., "The Great Gatsby by F. Scott Fitzgerald")
+        """
+        if not self.ollama_available:
+            # Fallback: just clean up underscores/dashes
+            return filename.replace("_", " ").replace("-", " ").strip()
+
+        prompt = f"""Given this PDF filename, extract the likely book/document title and author (if present).
+Return ONLY a clean, speakable phrase suitable for text-to-speech.
+
+Examples:
+- "Clean_Code_A_Handbook_Robert_C_Martin_2008" → "Clean Code by Robert C. Martin"
+- "the-pragmatic-programmer-2nd-edition-scan" → "The Pragmatic Programmer"
+- "1984_George_Orwell_ebook" → "1984 by George Orwell"
+- "financial_report_q3_2024_final_v2" → "Financial Report Q3 2024"
+
+Filename: {filename}
+
+Clean title:"""
+
+        try:
+            result = subprocess.run(
+                [self.ollama_path, "run", self.ollama_model, prompt],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            if result.returncode == 0:
+                clean_title = result.stdout.strip()
+                # Remove any quotes that might have been added
+                clean_title = clean_title.strip("\"'")
+                # Sanity check: if response is too long or empty, fallback
+                if clean_title and len(clean_title) < 200:
+                    return clean_title
+
+        except (subprocess.TimeoutExpired, Exception) as e:
+            self.logger.debug(f"Title extraction failed: {e}")
+
+        # Fallback
+        return filename.replace("_", " ").replace("-", " ").strip()
+
+    def _send_broca_notification(self, message: str) -> bool:
+        """
+        Send a notification message to Broca for TTS.
+
+        Args:
+            message: Text to speak
+
+        Returns:
+            True if message was sent successfully
+        """
+        if not self.broca_producer:
+            return False
+
+        try:
+            msg = {
+                "text": message,
+                "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+            }
+            future = self.broca_producer.send(self.broca_topic, value=msg)
+            future.get(timeout=5)
+            self.logger.debug(f"Sent Broca notification: {message}")
+            return True
+
+        except KafkaError as e:
+            self.logger.warning(f"Failed to send Broca notification: {e}")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Unexpected error sending to Broca: {e}")
             return False
 
     def _extract_with_vision(self, page, dpi: int = 150) -> Optional[str]:
@@ -830,6 +941,13 @@ Format: YES 0.9 or NO 0.3"""
             else:
                 self.logger.info(f"Processing: {pdf_path}")
 
+            # Send notification to Broca when starting to process
+            if self.notify_broca and self.broca_producer:
+                filename = Path(pdf_path).stem
+                clean_title = self._guess_title_from_filename(filename)
+                notification = f"Now processing: {clean_title}"
+                self._send_broca_notification(notification)
+
             # Convert PDF to markdown
             markdown_content = self.pdf_to_markdown(pdf_path)
 
@@ -951,6 +1069,15 @@ Format: YES 0.9 or NO 0.3"""
         self.logger.info(f"  Successful: {stats['successful']}")
         self.logger.info(f"  Errors: {stats['errors']}")
         self.logger.info("=" * 60)
+
+        # Cleanup Kafka producer
+        if self.broca_producer:
+            try:
+                self.broca_producer.flush()
+                self.broca_producer.close()
+            except Exception:
+                pass
+
         self.logger.info("PDF Tracker stopped")
 
 
@@ -1007,6 +1134,12 @@ Note: When --force-reprocess is provided, the script runs once and exits.
         help="Seconds between directory scans (default: 5)",
     )
 
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Disable Broca TTS notifications when processing starts",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -1025,6 +1158,8 @@ Note: When --force-reprocess is provided, the script runs once and exits.
             include_metadata=not args.no_metadata,
             # Force reprocess pattern
             force_reprocess_pattern=args.force_reprocess,
+            # Broca notifications
+            notify_broca=not args.no_notify,
         )
 
         # If force-reprocess is set, run single scan and exit

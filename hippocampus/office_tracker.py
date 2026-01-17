@@ -13,9 +13,13 @@ import time
 import re
 import subprocess
 import argparse
+import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
+
+from kafka import KafkaProducer
+from kafka.errors import KafkaError
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -65,6 +69,7 @@ class OfficeTracker:
         ollama_model: str = "llama3.2:1b",
         include_metadata: bool = True,
         force_reprocess_pattern: str = None,
+        notify_broca: bool = True,
     ):
         """
         Initialize Office document tracker.
@@ -80,6 +85,7 @@ class OfficeTracker:
             ollama_model: Ollama model to use
             include_metadata: Include YAML frontmatter with document metadata
             force_reprocess_pattern: Regex pattern to match filenames for forced reprocessing
+            notify_broca: Send TTS notification to Broca when processing starts
         """
         # Get paths from config if not provided
         config = Config()
@@ -112,6 +118,12 @@ class OfficeTracker:
                 raise ValueError(
                     f"Invalid regex pattern: {force_reprocess_pattern} - {e}"
                 )
+
+        # Broca notification settings
+        self.notify_broca = notify_broca
+        self.broca_producer = None
+        self.broca_topic = config.get("BROCA_KAFKA_TOPIC", "ai_out")
+        self.kafka_servers = config.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
         # Setup logging
         default_log_dir = os.path.join(
@@ -155,6 +167,22 @@ class OfficeTracker:
             self.logger.warning(
                 "odfpy not available - .odt metadata limited to filename"
             )
+
+        # Initialize Broca Kafka producer
+        if self.notify_broca:
+            try:
+                self.broca_producer = KafkaProducer(
+                    bootstrap_servers=self.kafka_servers,
+                    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                    api_version_auto_timeout_ms=5000,
+                    retries=3,
+                )
+                self.logger.info(
+                    f"Broca notifications enabled (topic: {self.broca_topic})"
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not connect to Kafka for Broca: {e}")
+                self.broca_producer = None
 
         # Create directories if they don't exist
         os.makedirs(self.input_dir, exist_ok=True)
@@ -251,6 +279,79 @@ class OfficeTracker:
                 return pull_result.returncode == 0
             return False
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            return False
+
+    def _guess_title_from_filename(self, filename: str) -> str:
+        """
+        Use Ollama to guess a clean title/author from the document filename.
+
+        Args:
+            filename: The document filename (without path or extension)
+
+        Returns:
+            A clean, speakable title string
+        """
+        if not self.ollama_available:
+            return filename.replace("_", " ").replace("-", " ").strip()
+
+        prompt = f"""Given this document filename, extract the likely title and author (if present).
+Return ONLY a clean, speakable phrase suitable for text-to-speech.
+
+Examples:
+- "meeting_notes_q3_2024_final_v2" → "Meeting Notes Q3 2024"
+- "John_Smith_Resume_2024" → "Resume by John Smith"
+- "project_proposal_acme_corp" → "Project Proposal for Acme Corp"
+
+Filename: {filename}
+
+Clean title:"""
+
+        try:
+            result = subprocess.run(
+                [self.ollama_path, "run", self.ollama_model, prompt],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            if result.returncode == 0:
+                clean_title = result.stdout.strip().strip("\"'")
+                if clean_title and len(clean_title) < 200:
+                    return clean_title
+
+        except (subprocess.TimeoutExpired, Exception) as e:
+            self.logger.debug(f"Title extraction failed: {e}")
+
+        return filename.replace("_", " ").replace("-", " ").strip()
+
+    def _send_broca_notification(self, message: str) -> bool:
+        """
+        Send a notification message to Broca for TTS.
+
+        Args:
+            message: Text to speak
+
+        Returns:
+            True if message was sent successfully
+        """
+        if not self.broca_producer:
+            return False
+
+        try:
+            msg = {
+                "text": message,
+                "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+            }
+            future = self.broca_producer.send(self.broca_topic, value=msg)
+            future.get(timeout=5)
+            self.logger.debug(f"Sent Broca notification: {message}")
+            return True
+
+        except KafkaError as e:
+            self.logger.warning(f"Failed to send Broca notification: {e}")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Unexpected error sending to Broca: {e}")
             return False
 
     def find_office_files(self) -> List[str]:
@@ -697,6 +798,13 @@ Respond with ONLY one word: TOC, COPYRIGHT, SUBSTANTIVE, or UNKNOWN"""
         try:
             self.logger.info(f"Processing: {file_path}")
 
+            # Send notification to Broca when starting to process
+            if self.notify_broca and self.broca_producer:
+                filename = Path(file_path).stem
+                clean_title = self._guess_title_from_filename(filename)
+                notification = f"Now processing: {clean_title}"
+                self._send_broca_notification(notification)
+
             # Convert to markdown
             markdown_content = self.office_to_markdown(file_path)
 
@@ -816,6 +924,15 @@ Respond with ONLY one word: TOC, COPYRIGHT, SUBSTANTIVE, or UNKNOWN"""
         self.logger.info(f"  Successful: {stats['successful']}")
         self.logger.info(f"  Errors: {stats['errors']}")
         self.logger.info("=" * 60)
+
+        # Cleanup Kafka producer
+        if self.broca_producer:
+            try:
+                self.broca_producer.flush()
+                self.broca_producer.close()
+            except Exception:
+                pass
+
         self.logger.info("Office Tracker stopped")
 
 
@@ -871,6 +988,12 @@ Note: When --force-reprocess is provided, the script runs once and exits.
         help="Seconds between directory scans (default: 5)",
     )
 
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Disable Broca TTS notifications when processing starts",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -883,6 +1006,7 @@ Note: When --force-reprocess is provided, the script runs once and exits.
             ollama_model="llama3.2:1b",
             include_metadata=not args.no_metadata,
             force_reprocess_pattern=args.force_reprocess,
+            notify_broca=not args.no_notify,
         )
 
         # If force-reprocess is set, run single scan and exit
