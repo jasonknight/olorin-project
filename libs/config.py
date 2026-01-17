@@ -77,6 +77,15 @@ _KEY_TO_PATH = {
     "CONTROL_API_ENABLED": "control.api.enabled",
     "CONTROL_API_PORT": "control.api.port",
     "CONTROL_API_HOST": "control.api.host",
+    # Tracker common settings
+    "TRACKER_OLLAMA_ENABLED": "hippocampus.trackers.ollama.enabled",
+    "TRACKER_OLLAMA_MODEL": "hippocampus.trackers.ollama.model",
+    "TRACKER_OLLAMA_THRESHOLD": "hippocampus.trackers.ollama.threshold",
+    "TRACKER_OLLAMA_PATHS": "hippocampus.trackers.ollama.paths",
+    "TRACKER_MIN_CONTENT_CHARS": "hippocampus.trackers.min_content_chars",
+    "TRACKER_MIN_CONTENT_DENSITY": "hippocampus.trackers.min_content_density",
+    "TRACKER_MIN_WORD_COUNT": "hippocampus.trackers.min_word_count",
+    "TRACKER_NOTIFY_BROCA": "hippocampus.trackers.notify_broca",
     # Tools (AI tool use)
     "TOOLS_WRITE_ENABLED": "tools.write.enabled",
     "TOOLS_WRITE_PORT": "tools.write.port",

@@ -5,373 +5,243 @@ Monitors ~/Documents/AI_IN for TXT files, converts them to markdown,
 and tracks processed files to avoid reprocessing.
 """
 
+import argparse
 import os
-import sys
-import time
 import re
 import subprocess
-import argparse
-import json
-from pathlib import Path
-from typing import List, Dict, Optional
+import sys
 from datetime import datetime
-
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
+from pathlib import Path
+from typing import Dict, List
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from libs.olorin_logging import OlorinLogger
-from libs.config import Config
 
-from file_tracker import FileTracker
+from document_tracker_base import DocumentTrackerBase
 
 
-class TxtTracker:
+class TxtTracker(DocumentTrackerBase):
     """
     Monitors directory for TXT files and converts them to markdown.
     """
 
+    # Class attributes required by base class
+    EXTENSIONS = {".txt"}
+    TRACKER_NAME = "TXT"
+    LOG_FILENAME = "hippocampus-txt-tracker.log"
+    TRACKING_DB_CONFIG_KEY = "TXT_TRACKING_DB"
+
     def __init__(
         self,
-        input_dir: str = None,
-        output_dir: str = None,
-        tracking_db: str = None,
-        poll_interval: int = 5,
-        reprocess_on_change: bool = True,
-        min_content_chars: int = 50,
-        min_content_density: float = 0.2,
-        use_ollama: bool = True,
-        ollama_model: str = "llama3.2:1b",
-        ollama_threshold: float = 0.5,
-        include_metadata: bool = True,
-        force_reprocess_pattern: str = None,
         detect_structure: bool = True,
-        notify_broca: bool = True,
+        **kwargs,
     ):
         """
         Initialize TXT tracker.
 
         Args:
-            input_dir: Directory to monitor for text files (default from config)
-            output_dir: Directory to save markdown files (defaults to input_dir)
-            tracking_db: Path to SQLite tracking database (default from config)
-            poll_interval: Seconds between directory scans
-            reprocess_on_change: Reprocess if text file content changes
-            min_content_chars: Minimum characters for content to be considered
-            min_content_density: Minimum ratio of alphanumeric to total chars
-            use_ollama: Enable local LLM for structure detection
-            ollama_model: Ollama model to use (e.g., llama3.2:1b, phi3:mini)
-            ollama_threshold: Minimum relevance score (0-1) to include content
-            include_metadata: Include YAML frontmatter with document metadata
-            force_reprocess_pattern: Regex pattern to match filenames for forced reprocessing
             detect_structure: Attempt to detect and convert text structure to markdown
-            notify_broca: Send TTS notification to Broca when processing starts
+            **kwargs: Arguments passed to DocumentTrackerBase
         """
-        # Get paths from config if not provided
-        config = Config()
-        if input_dir is None:
-            input_dir = config.get_path("INPUT_DIR", "~/Documents/AI_IN")
-        if tracking_db is None:
-            tracking_db = config.get_path(
-                "TXT_TRACKING_DB", "./hippocampus/data/txt_tracking.db"
-            )
-
-        self.input_dir = os.path.expanduser(input_dir)
-        self.output_dir = (
-            os.path.expanduser(output_dir) if output_dir else self.input_dir
-        )
-        self.poll_interval = poll_interval
-        self.reprocess_on_change = reprocess_on_change
-
-        # Cleaning configuration
-        self.min_content_chars = min_content_chars
-        self.min_content_density = min_content_density
-        self.use_ollama = use_ollama
-        self.ollama_model = ollama_model
-        self.ollama_threshold = ollama_threshold
-        self.include_metadata = include_metadata
+        # TXT-specific configuration
         self.detect_structure = detect_structure
 
-        # Force reprocess pattern
-        self.force_reprocess_regex = None
-        if force_reprocess_pattern:
+        # Initialize base class
+        super().__init__(**kwargs)
+
+    # =========================================================================
+    # Abstract method implementations
+    # =========================================================================
+
+    def find_files(self) -> List[str]:
+        """Find all TXT files in the input directory."""
+        return self._find_files_by_extensions()
+
+    def to_markdown(self, txt_path: str) -> str:
+        """
+        Convert TXT to markdown text with intelligent structure detection.
+
+        Args:
+            txt_path: Path to TXT file
+
+        Returns:
+            Markdown formatted text
+        """
+        markdown_parts = []
+
+        # Read file content
+        try:
+            # Try UTF-8 first, fallback to latin-1
             try:
-                self.force_reprocess_regex = re.compile(force_reprocess_pattern)
-            except re.error as e:
-                raise ValueError(
-                    f"Invalid regex pattern: {force_reprocess_pattern} - {e}"
-                )
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                with open(txt_path, "r", encoding="latin-1") as f:
+                    content = f.read()
+        except Exception as e:
+            self.logger.error(f"Error reading file {txt_path}: {e}")
+            return ""
 
-        # Broca notification settings
-        self.notify_broca = notify_broca
-        self.broca_producer = None
-        self.broca_topic = config.get("BROCA_KAFKA_TOPIC", "ai_out")
-        self.kafka_servers = config.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+        # Normalize text
+        content = self._normalize_text(content)
 
-        # Setup logging
-        default_log_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "logs"
-        )
-        log_file = os.path.join(default_log_dir, "hippocampus-txt-tracker.log")
-        self.logger = OlorinLogger(log_file=log_file, log_level="INFO", name=__name__)
+        if not self._is_content_substantial(content):
+            self.logger.warning(f"Content not substantial: {txt_path}")
+            return ""
 
-        # Check Ollama availability
-        self.ollama_available = False
-        if self.use_ollama:
-            self.ollama_available = self._check_ollama()
-            if self.ollama_available:
-                self.logger.info(f"Ollama detected - using model: {self.ollama_model}")
+        # Extract metadata and build frontmatter
+        if self.include_metadata:
+            metadata = self._extract_metadata(txt_path, content)
+            markdown_parts.append(self._build_yaml_frontmatter(metadata))
+            markdown_parts.append(f"# {metadata['title']}\n\n")
+        else:
+            filename = Path(txt_path).stem
+            markdown_parts.append(f"# {filename}\n\n")
+            markdown_parts.append("---\n\n")
+
+        # Apply structure detection
+        if self.detect_structure:
+            # First try LLM enhancement for short texts
+            if self.ollama_available and len(content) <= 3000:
+                enhanced = self._enhance_with_llm(content)
+                if enhanced != content:
+                    self.logger.debug("Applied LLM enhancement")
+                    content = enhanced
+                else:
+                    # Fall back to heuristic detection
+                    content = self._detect_headings(content)
+                    content = self._detect_lists(content)
+                    content = self._detect_code_blocks(content)
             else:
-                self.logger.warning(
-                    "Ollama not available - falling back to heuristics only"
-                )
+                # Use heuristic detection for longer texts
+                content = self._detect_headings(content)
+                content = self._detect_lists(content)
+                content = self._detect_code_blocks(content)
 
-        # Initialize Broca Kafka producer
-        if self.notify_broca:
-            try:
-                self.broca_producer = KafkaProducer(
-                    bootstrap_servers=self.kafka_servers,
-                    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                    api_version_auto_timeout_ms=5000,
-                    retries=3,
-                )
-                self.logger.info(
-                    f"Broca notifications enabled (topic: {self.broca_topic})"
-                )
-            except Exception as e:
-                self.logger.warning(f"Could not connect to Kafka for Broca: {e}")
-                self.broca_producer = None
+        # Final normalization
+        content = self._normalize_text(content)
 
-        # Create directories if they don't exist
-        os.makedirs(self.input_dir, exist_ok=True)
-        os.makedirs(self.output_dir, exist_ok=True)
+        markdown_parts.append(content)
 
-        # Initialize file tracker
-        self.file_tracker = FileTracker(tracking_db)
+        return "".join(markdown_parts)
 
-        self.logger.info("TXT Tracker initialized")
-        self.logger.info(f"Monitoring directory: {self.input_dir}")
-        self.logger.info(f"Output directory: {self.output_dir}")
-        if self.force_reprocess_regex:
-            self.logger.info(f"Force reprocess pattern: {force_reprocess_pattern}")
-
-    def find_txt_files(self) -> List[str]:
+    def process_file(self, txt_path: str) -> bool:
         """
-        Find all TXT files in the input directory.
-
-        Returns:
-            List of absolute file paths
-        """
-        txt_files = []
-        input_path = Path(self.input_dir)
-
-        for txt_file in input_path.rglob("*.txt"):
-            if txt_file.is_file():
-                txt_files.append(str(txt_file.absolute()))
-
-        for txt_file in input_path.rglob("*.TXT"):
-            if txt_file.is_file():
-                txt_files.append(str(txt_file.absolute()))
-
-        return txt_files
-
-    def _get_ollama_path(self) -> Optional[str]:
-        """
-        Find the ollama binary path.
-
-        Returns:
-            Path to ollama binary or None
-        """
-        paths = [
-            "ollama",
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-            "/Applications/Ollama.app/Contents/Resources/ollama",
-        ]
-
-        for path in paths:
-            try:
-                result = subprocess.run(
-                    [path, "--version"], capture_output=True, timeout=2
-                )
-                if result.returncode == 0:
-                    return path
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
-
-        return None
-
-    def _check_ollama(self) -> bool:
-        """
-        Check if Ollama is available on the system.
-
-        Returns:
-            True if Ollama is available and model exists
-        """
-        self.ollama_path = self._get_ollama_path()
-
-        if not self.ollama_path:
-            return False
-
-        try:
-            result = subprocess.run(
-                [self.ollama_path, "list"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                if self.ollama_model in result.stdout:
-                    return True
-                self.logger.info(f"Pulling Ollama model: {self.ollama_model}")
-                pull_result = subprocess.run(
-                    [self.ollama_path, "pull", self.ollama_model],
-                    capture_output=True,
-                    timeout=300,
-                )
-                return pull_result.returncode == 0
-            return False
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-            return False
-
-    def _guess_title_from_filename(self, filename: str) -> str:
-        """
-        Use Ollama to guess a clean title from the text filename.
+        Process a single TXT file.
 
         Args:
-            filename: The text filename (without path or extension)
+            txt_path: Path to TXT file
 
         Returns:
-            A clean, speakable title string
+            True if processing succeeded
         """
-        if not self.ollama_available:
-            return filename.replace("_", " ").replace("-", " ").strip()
-
-        prompt = f"""Given this text filename, extract a clean, readable title.
-Return ONLY a clean, speakable phrase suitable for text-to-speech.
-
-Examples:
-- "meeting_notes_2024_q3_final" → "Meeting Notes Q3 2024"
-- "readme-project-alpha" → "Readme for Project Alpha"
-- "john_doe_cover_letter" → "Cover Letter by John Doe"
-
-Filename: {filename}
-
-Clean title:"""
-
         try:
-            result = subprocess.run(
-                [self.ollama_path, "run", self.ollama_model, prompt],
-                capture_output=True,
-                text=True,
-                timeout=15,
+            self.logger.info(f"Processing: {txt_path}")
+
+            # Send notification to Broca when starting to process
+            if self.notify_broca and self.broca_producer:
+                filename = Path(txt_path).stem
+                clean_title = self._guess_title_from_filename(filename)
+                notification = f"Now processing: {clean_title}"
+                self._send_broca_notification(notification)
+
+            # Convert TXT to markdown
+            markdown_content = self.to_markdown(txt_path)
+
+            if not markdown_content.strip():
+                self.logger.warning(f"No content extracted from: {txt_path}")
+                return False
+
+            # Generate output filename
+            txt_filename = Path(txt_path).stem
+            output_path = os.path.join(self.output_dir, f"{txt_filename}.md")
+
+            # Write markdown file
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(markdown_content)
+
+            # Mark as processed
+            self.file_tracker.mark_processed(txt_path, chunk_count=0, status="success")
+
+            self.logger.info(
+                f"Successfully converted {Path(txt_path).name} -> {Path(output_path).name}"
             )
 
-            if result.returncode == 0:
-                clean_title = result.stdout.strip().strip("\"'")
-                if clean_title and len(clean_title) < 200:
-                    return clean_title
-
-        except (subprocess.TimeoutExpired, Exception) as e:
-            self.logger.debug(f"Title extraction failed: {e}")
-
-        return filename.replace("_", " ").replace("-", " ").strip()
-
-    def _send_broca_notification(self, message: str) -> bool:
-        """
-        Send a notification message to Broca for TTS.
-
-        Args:
-            message: Text to speak
-
-        Returns:
-            True if message was sent successfully
-        """
-        if not self.broca_producer:
-            return False
-
-        try:
-            msg = {
-                "text": message,
-                "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
-            }
-            future = self.broca_producer.send(self.broca_topic, value=msg)
-            future.get(timeout=5)
-            self.logger.debug(f"Sent Broca notification: {message}")
             return True
 
-        except KafkaError as e:
-            self.logger.warning(f"Failed to send Broca notification: {e}")
-            return False
         except Exception as e:
-            self.logger.warning(f"Unexpected error sending to Broca: {e}")
+            self.logger.error(f"Error processing {txt_path}: {e}", exc_info=True)
+            try:
+                self.file_tracker.mark_processed(
+                    txt_path, chunk_count=0, status="error"
+                )
+            except Exception:
+                pass
+
             return False
 
-    def _calculate_content_density(self, text: str) -> float:
+    def _extract_metadata(self, txt_path: str, content: str = None) -> Dict[str, str]:
         """
-        Calculate the ratio of meaningful content to total characters.
+        Extract metadata from text file.
 
         Args:
-            text: Text to analyze
+            txt_path: Path to text file
+            content: File content (optional, will be read if not provided)
 
         Returns:
-            Ratio of alphanumeric characters to total (0-1)
+            Dictionary containing metadata fields
         """
-        if not text:
-            return 0.0
+        metadata = {}
 
-        total_chars = len(text)
-        alphanumeric_chars = sum(1 for c in text if c.isalnum())
+        # Read content if not provided
+        if content is None:
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                with open(txt_path, "r", encoding="latin-1") as f:
+                    content = f.read()
+            except Exception:
+                content = ""
 
-        return alphanumeric_chars / total_chars if total_chars > 0 else 0.0
+        # Title from filename
+        metadata["title"] = Path(txt_path).stem
 
-    def _is_content_substantial(self, text: str) -> bool:
-        """
-        Determine if content has substantial text using heuristics.
+        # Try to detect title from first non-empty line
+        lines = content.strip().split("\n")
+        for line in lines[:5]:
+            stripped = line.strip()
+            if stripped and len(stripped) < 100:
+                # Looks like a title if it's short and doesn't end with punctuation
+                if not re.search(r"[.!?,;:]$", stripped):
+                    metadata["title"] = stripped
+                    break
 
-        Args:
-            text: Text to analyze
+        # File modification date
+        try:
+            mtime = os.path.getmtime(txt_path)
+            metadata["file_date"] = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        except Exception:
+            metadata["file_date"] = "unknown"
 
-        Returns:
-            True if content meets minimum quality thresholds
-        """
-        if not text or not text.strip():
-            return False
+        # Source
+        metadata["source"] = "txt"
 
-        cleaned_text = text.strip()
-        if len(cleaned_text) < self.min_content_chars:
-            return False
+        # Word count
+        words = re.findall(r"\b\w+\b", content)
+        metadata["word_count"] = str(len(words))
 
-        density = self._calculate_content_density(cleaned_text)
-        if density < self.min_content_density:
-            return False
+        return metadata
 
-        words = re.findall(r"\b\w+\b", cleaned_text)
-        if len(words) < 10:
-            return False
+    def _get_title_prompt_examples(self) -> str:
+        """Return examples for the title extraction LLM prompt."""
+        return """- "meeting_notes_2024_q3_final" → "Meeting Notes Q3 2024"
+- "readme-project-alpha" → "Readme for Project Alpha"
+- "john_doe_cover_letter" → "Cover Letter by John Doe"""
 
-        return True
-
-    def _normalize_text(self, text: str) -> str:
-        """
-        Normalize text by removing artifacts and excessive whitespace.
-
-        Args:
-            text: Text to normalize
-
-        Returns:
-            Cleaned text
-        """
-        # Remove form feed and other control characters
-        text = text.replace("\f", "\n")
-        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-
-        # Normalize line endings
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Normalize whitespace
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-
-        return text.strip()
+    # =========================================================================
+    # TXT-specific methods
+    # =========================================================================
 
     def _detect_headings(self, text: str) -> str:
         """
@@ -455,8 +325,8 @@ Clean title:"""
                 continue
 
             # Detect bullet-like patterns
-            # - Lines starting with *, -, o, •, >, etc.
-            bullet_match = re.match(r"^[*\-o•>]\s+(.+)$", stripped)
+            # - Lines starting with *, -, o, bullet, >, etc.
+            bullet_match = re.match(r"^[*\-o\u2022>]\s+(.+)$", stripped)
             if bullet_match:
                 result.append(f"- {bullet_match.group(1)}")
                 continue
@@ -468,7 +338,7 @@ Clean title:"""
             if (
                 numbered_match and len(stripped) < 200
             ):  # Avoid false positives on long lines
-                # Check if content looks like a list item (doesn't end with period usually, or is short)
+                # Check if content looks like a list item
                 content = numbered_match.group(1)
                 if len(content) < 100 or not content.endswith("."):
                     result.append(f"- {content}")
@@ -498,7 +368,7 @@ Clean title:"""
             is_code_line = (
                 line.startswith("    ")
                 or line.startswith("\t")
-                or re.match(r"^[ \t]*[{}\[\]();]", line)  # Lines with common code chars
+                or re.match(r"^[ \t]*[{}\[\]();]", line)
                 or re.match(
                     r"^[ \t]*(def |class |function |if |for |while |import |from |var |let |const )",
                     line,
@@ -591,303 +461,13 @@ Text:
             if result.returncode == 0 and result.stdout.strip():
                 enhanced = result.stdout.strip()
                 # Validate output is reasonable
-                if (
-                    len(enhanced) >= len(text) * 0.5
-                ):  # At least half the original length
+                if len(enhanced) >= len(text) * 0.5:
                     return enhanced
 
         except (subprocess.TimeoutExpired, Exception) as e:
             self.logger.debug(f"LLM enhancement failed: {e}")
 
         return text
-
-    def _extract_metadata(self, txt_path: str, content: str) -> Dict[str, str]:
-        """
-        Extract metadata from text file.
-
-        Args:
-            txt_path: Path to text file
-            content: File content
-
-        Returns:
-            Dictionary containing metadata fields
-        """
-        metadata = {}
-
-        # Title from filename
-        metadata["title"] = Path(txt_path).stem
-
-        # Try to detect title from first non-empty line
-        lines = content.strip().split("\n")
-        for line in lines[:5]:
-            stripped = line.strip()
-            if stripped and len(stripped) < 100:
-                # Looks like a title if it's short and doesn't end with punctuation
-                if not re.search(r"[.!?,;:]$", stripped):
-                    metadata["title"] = stripped
-                    break
-
-        # File modification date
-        try:
-            mtime = os.path.getmtime(txt_path)
-            metadata["file_date"] = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
-        except Exception:
-            metadata["file_date"] = "unknown"
-
-        # Source
-        metadata["source"] = "txt"
-
-        # Word count
-        words = re.findall(r"\b\w+\b", content)
-        metadata["word_count"] = str(len(words))
-
-        return metadata
-
-    def should_process_file(self, file_path: str) -> bool:
-        """
-        Determine if a text file should be processed.
-
-        Args:
-            file_path: Path to text file
-
-        Returns:
-            True if file should be processed
-        """
-        if not os.path.exists(file_path):
-            return False
-
-        if self.force_reprocess_regex:
-            filename = Path(file_path).name
-            if self.force_reprocess_regex.search(filename):
-                self.logger.info(f"Force reprocessing (matches pattern): {filename}")
-                return True
-
-        if not self.file_tracker.is_file_processed(file_path):
-            return True
-
-        if self.reprocess_on_change:
-            return self.file_tracker.has_file_changed(file_path)
-
-        return False
-
-    def txt_to_markdown(self, txt_path: str) -> str:
-        """
-        Convert TXT to markdown text with intelligent structure detection.
-
-        Args:
-            txt_path: Path to TXT file
-
-        Returns:
-            Markdown formatted text
-        """
-        markdown_parts = []
-
-        # Read file content
-        try:
-            # Try UTF-8 first, fallback to latin-1
-            try:
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            except UnicodeDecodeError:
-                with open(txt_path, "r", encoding="latin-1") as f:
-                    content = f.read()
-        except Exception as e:
-            self.logger.error(f"Error reading file {txt_path}: {e}")
-            return ""
-
-        # Normalize text
-        content = self._normalize_text(content)
-
-        if not self._is_content_substantial(content):
-            self.logger.warning(f"Content not substantial: {txt_path}")
-            return ""
-
-        # Extract metadata
-        if self.include_metadata:
-            metadata = self._extract_metadata(txt_path, content)
-
-            markdown_parts.append("---\n")
-            markdown_parts.append(f'title: "{metadata["title"]}"\n')
-            markdown_parts.append(f'source: "{metadata["source"]}"\n')
-            markdown_parts.append(f'file_date: "{metadata["file_date"]}"\n')
-            markdown_parts.append(f"word_count: {metadata['word_count']}\n")
-            markdown_parts.append("---\n\n")
-            markdown_parts.append(f"# {metadata['title']}\n\n")
-        else:
-            filename = Path(txt_path).stem
-            markdown_parts.append(f"# {filename}\n\n")
-            markdown_parts.append("---\n\n")
-
-        # Apply structure detection
-        if self.detect_structure:
-            # First try LLM enhancement for short texts
-            if self.ollama_available and len(content) <= 3000:
-                enhanced = self._enhance_with_llm(content)
-                if enhanced != content:
-                    self.logger.debug("Applied LLM enhancement")
-                    content = enhanced
-                else:
-                    # Fall back to heuristic detection
-                    content = self._detect_headings(content)
-                    content = self._detect_lists(content)
-                    content = self._detect_code_blocks(content)
-            else:
-                # Use heuristic detection for longer texts
-                content = self._detect_headings(content)
-                content = self._detect_lists(content)
-                content = self._detect_code_blocks(content)
-
-        # Final normalization
-        content = self._normalize_text(content)
-
-        markdown_parts.append(content)
-
-        return "".join(markdown_parts)
-
-    def process_txt(self, txt_path: str) -> bool:
-        """
-        Process a single TXT file.
-
-        Args:
-            txt_path: Path to TXT file
-
-        Returns:
-            True if processing succeeded
-        """
-        try:
-            self.logger.info(f"Processing: {txt_path}")
-
-            # Send notification to Broca when starting to process
-            if self.notify_broca and self.broca_producer:
-                filename = Path(txt_path).stem
-                clean_title = self._guess_title_from_filename(filename)
-                notification = f"Now processing: {clean_title}"
-                self._send_broca_notification(notification)
-
-            # Convert TXT to markdown
-            markdown_content = self.txt_to_markdown(txt_path)
-
-            if not markdown_content.strip():
-                self.logger.warning(f"No content extracted from: {txt_path}")
-                return False
-
-            # Generate output filename
-            txt_filename = Path(txt_path).stem
-            output_path = os.path.join(self.output_dir, f"{txt_filename}.md")
-
-            # Write markdown file
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(markdown_content)
-
-            # Mark as processed
-            self.file_tracker.mark_processed(txt_path, chunk_count=0, status="success")
-
-            self.logger.info(
-                f"Successfully converted {Path(txt_path).name} -> {Path(output_path).name}"
-            )
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error processing {txt_path}: {e}", exc_info=True)
-            try:
-                self.file_tracker.mark_processed(
-                    txt_path, chunk_count=0, status="error"
-                )
-            except Exception:
-                pass
-
-            return False
-
-    def run_single_scan(self) -> Dict[str, int]:
-        """
-        Run a single scan of the input directory.
-
-        Returns:
-            Dictionary with scan statistics
-        """
-        stats = {
-            "files_found": 0,
-            "files_processed": 0,
-            "files_skipped": 0,
-            "files_failed": 0,
-        }
-
-        txt_files = self.find_txt_files()
-        stats["files_found"] = len(txt_files)
-
-        if not txt_files:
-            self.logger.debug(f"No TXT files found in {self.input_dir}")
-            return stats
-
-        for file_path in txt_files:
-            if self.should_process_file(file_path):
-                if self.process_txt(file_path):
-                    stats["files_processed"] += 1
-                else:
-                    stats["files_failed"] += 1
-            else:
-                stats["files_skipped"] += 1
-                self.logger.debug(f"Skipping (already processed): {file_path}")
-
-        return stats
-
-    def run_continuous(self):
-        """
-        Run continuous monitoring loop.
-        """
-        self.logger.info(
-            f"Starting continuous TXT monitoring (poll interval: {self.poll_interval}s)"
-        )
-        self.logger.info("Press Ctrl+C to stop")
-
-        scan_count = 0
-
-        try:
-            while True:
-                scan_count += 1
-                self.logger.debug(f"Scan #{scan_count}")
-
-                stats = self.run_single_scan()
-
-                if stats["files_processed"] > 0 or stats["files_failed"] > 0:
-                    self.logger.info(
-                        f"Scan #{scan_count} complete: "
-                        f"{stats['files_processed']} processed, "
-                        f"{stats['files_failed']} failed, "
-                        f"{stats['files_skipped']} skipped"
-                    )
-
-                    tracker_stats = self.file_tracker.get_statistics()
-                    self.logger.info(
-                        f"Total: {tracker_stats['total_files']} TXT files processed"
-                    )
-
-                time.sleep(self.poll_interval)
-
-        except KeyboardInterrupt:
-            self.logger.info("\nShutting down gracefully...")
-            self._shutdown()
-
-    def _shutdown(self):
-        """Cleanup and shutdown."""
-        stats = self.file_tracker.get_statistics()
-        self.logger.info("\n" + "=" * 60)
-        self.logger.info("Final Statistics:")
-        self.logger.info(f"  Total TXT files processed: {stats['total_files']}")
-        self.logger.info(f"  Successful: {stats['successful']}")
-        self.logger.info(f"  Errors: {stats['errors']}")
-        self.logger.info("=" * 60)
-
-        # Cleanup Kafka producer
-        if self.broca_producer:
-            try:
-                self.broca_producer.flush()
-                self.broca_producer.close()
-            except Exception:
-                pass
-
-        self.logger.info("TXT Tracker stopped")
 
 
 def main():
@@ -919,15 +499,14 @@ Note: When --force-reprocess is provided, the script runs once and exits.
         type=str,
         metavar="PATTERN",
         help="Regex pattern to match TXT filenames for forced reprocessing. "
-        "Runs in one-shot mode (single scan then exit) instead of continuous monitoring. "
-        'Example patterns: "^notes" or "2024" or "filename\\.txt$"',
+        "Runs in one-shot mode (single scan then exit) instead of continuous monitoring.",
     )
 
     parser.add_argument(
         "--input-dir",
         type=str,
-        default="~/Documents/AI_IN",
-        help="Directory to monitor for TXT files (default: ~/Documents/AI_IN)",
+        default=None,
+        help="Directory to monitor for TXT files (default: from config)",
     )
 
     parser.add_argument(
@@ -945,8 +524,8 @@ Note: When --force-reprocess is provided, the script runs once and exits.
     parser.add_argument(
         "--poll-interval",
         type=int,
-        default=5,
-        help="Seconds between directory scans (default: 5)",
+        default=None,
+        help="Seconds between directory scans (default: from config)",
     )
 
     parser.add_argument(
@@ -961,12 +540,6 @@ Note: When --force-reprocess is provided, the script runs once and exits.
         tracker = TxtTracker(
             input_dir=args.input_dir,
             poll_interval=args.poll_interval,
-            reprocess_on_change=True,
-            min_content_chars=50,
-            min_content_density=0.2,
-            use_ollama=True,
-            ollama_model="llama3.2:1b",
-            ollama_threshold=0.5,
             include_metadata=not args.no_metadata,
             force_reprocess_pattern=args.force_reprocess,
             detect_structure=not args.no_structure,

@@ -35,6 +35,23 @@
   },
   "hippocampus": {
     "input_dir": "~/Documents/AI_IN",
+    "trackers": {
+      "ollama": {
+        "enabled": true,
+        "model": "llama3.2:1b",
+        "threshold": 0.5,
+        "paths": [
+          "ollama",
+          "/usr/local/bin/ollama",
+          "/opt/homebrew/bin/ollama",
+          "/Applications/Ollama.app/Contents/Resources/ollama"
+        ]
+      },
+      "min_content_chars": 100,
+      "min_content_density": 0.3,
+      "min_word_count": 20,
+      "notify_broca": true
+    },
     "chromadb": {
       "host": "localhost",
       "port": 8000,

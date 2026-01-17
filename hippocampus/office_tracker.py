@@ -7,26 +7,19 @@ and tracks processed files to avoid reprocessing.
 Uses pandoc for conversion with metadata extraction from document properties.
 """
 
+import argparse
 import os
-import sys
-import time
 import re
 import subprocess
-import argparse
-import json
-from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+import sys
 from datetime import datetime
-
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
+from pathlib import Path
+from typing import Dict, List, Optional
 
 # Add parent directory to path for libs import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from libs.olorin_logging import OlorinLogger
-from libs.config import Config
 
-from file_tracker import FileTracker
+from document_tracker_base import DocumentTrackerBase
 
 # Optional imports for metadata extraction
 DOCX_AVAILABLE = False
@@ -48,91 +41,29 @@ except ImportError:
     pass
 
 
-class OfficeTracker:
+class OfficeTracker(DocumentTrackerBase):
     """
     Monitors directory for Office documents and converts them to markdown.
     Supports .doc, .docx, and .odt formats using pandoc.
     """
 
-    # Supported extensions
+    # Class attributes required by base class
     EXTENSIONS = {".doc", ".docx", ".odt"}
+    TRACKER_NAME = "Office"
+    LOG_FILENAME = "hippocampus-office-tracker.log"
+    TRACKING_DB_CONFIG_KEY = "OFFICE_TRACKING_DB"
 
-    def __init__(
-        self,
-        input_dir: str = None,
-        output_dir: str = None,
-        tracking_db: str = None,
-        poll_interval: int = 5,
-        reprocess_on_change: bool = True,
-        min_content_chars: int = 100,
-        use_ollama: bool = True,
-        ollama_model: str = "llama3.2:1b",
-        include_metadata: bool = True,
-        force_reprocess_pattern: str = None,
-        notify_broca: bool = True,
-    ):
+    def __init__(self, **kwargs):
         """
         Initialize Office document tracker.
 
         Args:
-            input_dir: Directory to monitor for documents (default from config)
-            output_dir: Directory to save markdown files (defaults to input_dir)
-            tracking_db: Path to SQLite tracking database (default from config)
-            poll_interval: Seconds between directory scans
-            reprocess_on_change: Reprocess if document content changes
-            min_content_chars: Minimum characters for valid document
-            use_ollama: Enable local LLM for content filtering
-            ollama_model: Ollama model to use
-            include_metadata: Include YAML frontmatter with document metadata
-            force_reprocess_pattern: Regex pattern to match filenames for forced reprocessing
-            notify_broca: Send TTS notification to Broca when processing starts
+            **kwargs: Arguments passed to DocumentTrackerBase
         """
-        # Get paths from config if not provided
-        config = Config()
-        if input_dir is None:
-            input_dir = config.get_path("INPUT_DIR", "~/Documents/AI_IN")
-        if tracking_db is None:
-            tracking_db = config.get_path(
-                "OFFICE_TRACKING_DB", "./hippocampus/data/office_tracking.db"
-            )
+        # Initialize base class
+        super().__init__(**kwargs)
 
-        self.input_dir = os.path.expanduser(input_dir)
-        self.output_dir = (
-            os.path.expanduser(output_dir) if output_dir else self.input_dir
-        )
-        self.poll_interval = poll_interval
-        self.reprocess_on_change = reprocess_on_change
-
-        # Content configuration
-        self.min_content_chars = min_content_chars
-        self.use_ollama = use_ollama
-        self.ollama_model = ollama_model
-        self.include_metadata = include_metadata
-
-        # Force reprocess pattern
-        self.force_reprocess_regex = None
-        if force_reprocess_pattern:
-            try:
-                self.force_reprocess_regex = re.compile(force_reprocess_pattern)
-            except re.error as e:
-                raise ValueError(
-                    f"Invalid regex pattern: {force_reprocess_pattern} - {e}"
-                )
-
-        # Broca notification settings
-        self.notify_broca = notify_broca
-        self.broca_producer = None
-        self.broca_topic = config.get("BROCA_KAFKA_TOPIC", "ai_out")
-        self.kafka_servers = config.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-
-        # Setup logging
-        default_log_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "logs"
-        )
-        log_file = os.path.join(default_log_dir, "hippocampus-office-tracker.log")
-        self.logger = OlorinLogger(log_file=log_file, log_level="INFO", name=__name__)
-
-        # Check pandoc availability
+        # Check pandoc availability (Office-specific requirement)
         self.pandoc_path = self._get_pandoc_path()
         if self.pandoc_path:
             self.logger.info(f"Pandoc detected: {self.pandoc_path}")
@@ -143,15 +74,6 @@ class OfficeTracker:
             self.logger.error(
                 "Install pandoc: brew install pandoc (macOS) or apt install pandoc (Linux)"
             )
-
-        # Check Ollama availability
-        self.ollama_available = False
-        if self.use_ollama:
-            self.ollama_available = self._check_ollama()
-            if self.ollama_available:
-                self.logger.info(f"Ollama detected - using model: {self.ollama_model}")
-            else:
-                self.logger.warning("Ollama not available - skipping LLM filtering")
 
         # Log metadata extraction capabilities
         if DOCX_AVAILABLE:
@@ -168,35 +90,176 @@ class OfficeTracker:
                 "odfpy not available - .odt metadata limited to filename"
             )
 
-        # Initialize Broca Kafka producer
-        if self.notify_broca:
-            try:
-                self.broca_producer = KafkaProducer(
-                    bootstrap_servers=self.kafka_servers,
-                    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-                    api_version_auto_timeout_ms=5000,
-                    retries=3,
-                )
-                self.logger.info(
-                    f"Broca notifications enabled (topic: {self.broca_topic})"
-                )
-            except Exception as e:
-                self.logger.warning(f"Could not connect to Kafka for Broca: {e}")
-                self.broca_producer = None
-
-        # Create directories if they don't exist
-        os.makedirs(self.input_dir, exist_ok=True)
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        # Initialize file tracker
-        self.file_tracker = FileTracker(tracking_db)
-
-        self.logger.info("Office Tracker initialized")
-        self.logger.info(f"Monitoring directory: {self.input_dir}")
-        self.logger.info(f"Output directory: {self.output_dir}")
         self.logger.info(f"Supported formats: {', '.join(sorted(self.EXTENSIONS))}")
-        if self.force_reprocess_regex:
-            self.logger.info(f"Force reprocess pattern: {force_reprocess_pattern}")
+
+    # =========================================================================
+    # Abstract method implementations
+    # =========================================================================
+
+    def find_files(self) -> List[str]:
+        """Find all Office documents in the input directory."""
+        return self._find_files_by_extensions()
+
+    def to_markdown(self, file_path: str) -> str:
+        """
+        Convert Office document to markdown with metadata.
+
+        Args:
+            file_path: Path to document
+
+        Returns:
+            Markdown formatted text
+        """
+        markdown_parts = []
+
+        # Extract metadata
+        metadata = self._extract_metadata(file_path)
+
+        # Convert document content with pandoc
+        content = self._convert_with_pandoc(file_path)
+
+        if not content:
+            self.logger.warning(f"No content extracted from: {file_path}")
+            content = "_Document conversion failed or document is empty._\n"
+
+        # Normalize content
+        content = self._normalize_text(content)
+
+        # Check if content is substantial
+        if not self._is_content_substantial(content):
+            self.logger.warning(f"Content below minimum threshold: {file_path}")
+
+        # Check for boilerplate using LLM
+        if self.ollama_available and content:
+            is_boilerplate, content_type = self._is_boilerplate_content_llm(content)
+            if is_boilerplate:
+                self.logger.info(
+                    f"Content detected as {content_type}, but including anyway"
+                )
+
+        # Build markdown with YAML frontmatter
+        if self.include_metadata:
+            markdown_parts.append(self._build_yaml_frontmatter(metadata))
+            markdown_parts.append(f"# {metadata['title']}\n\n")
+        else:
+            markdown_parts.append(f"# {Path(file_path).stem}\n\n")
+            markdown_parts.append("---\n\n")
+
+        markdown_parts.append(content)
+
+        return "".join(markdown_parts)
+
+    def process_file(self, file_path: str) -> bool:
+        """
+        Process a single Office document.
+
+        Args:
+            file_path: Path to document
+
+        Returns:
+            True if processing succeeded
+        """
+        try:
+            self.logger.info(f"Processing: {file_path}")
+
+            # Send notification to Broca when starting to process
+            if self.notify_broca and self.broca_producer:
+                filename = Path(file_path).stem
+                clean_title = self._guess_title_from_filename(filename)
+                notification = f"Now processing: {clean_title}"
+                self._send_broca_notification(notification)
+
+            # Convert to markdown
+            markdown_content = self.to_markdown(file_path)
+
+            if not markdown_content.strip():
+                self.logger.warning(f"No content extracted from: {file_path}")
+                return False
+
+            # Generate output filename
+            doc_filename = Path(file_path).stem
+            output_path = os.path.join(self.output_dir, f"{doc_filename}.md")
+
+            # Write markdown file
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(markdown_content)
+
+            # Mark as processed
+            self.file_tracker.mark_processed(file_path, chunk_count=0, status="success")
+
+            self.logger.info(
+                f"Successfully converted {Path(file_path).name} -> {Path(output_path).name}"
+            )
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error processing {file_path}: {e}", exc_info=True)
+            try:
+                self.file_tracker.mark_processed(
+                    file_path, chunk_count=0, status="error"
+                )
+            except Exception:
+                pass
+
+            return False
+
+    def _extract_metadata(self, file_path: str) -> Dict[str, str]:
+        """
+        Extract metadata from an Office document based on its extension.
+
+        Args:
+            file_path: Path to document
+
+        Returns:
+            Dictionary containing metadata fields
+        """
+        ext = Path(file_path).suffix.lower()
+
+        if ext == ".docx":
+            return self._extract_metadata_docx(file_path)
+        elif ext == ".odt":
+            return self._extract_metadata_odt(file_path)
+        elif ext == ".doc":
+            return self._extract_metadata_doc(file_path)
+        else:
+            return {
+                "title": Path(file_path).stem,
+                "author": "unknown",
+                "publish_date": "unknown",
+                "keywords": ["unknown"],
+            }
+
+    def _get_title_prompt_examples(self) -> str:
+        """Return examples for the title extraction LLM prompt."""
+        return """- "meeting_notes_q3_2024_final_v2" → "Meeting Notes Q3 2024"
+- "John_Smith_Resume_2024" → "Resume by John Smith"
+- "project_proposal_acme_corp" → "Project Proposal for Acme Corp"""
+
+    # =========================================================================
+    # Override should_process_file to check pandoc availability
+    # =========================================================================
+
+    def should_process_file(self, file_path: str) -> bool:
+        """
+        Determine if a document should be processed.
+
+        Args:
+            file_path: Path to document
+
+        Returns:
+            True if file should be processed
+        """
+        # Check pandoc availability first
+        if not self.pandoc_path:
+            return False
+
+        # Delegate to base class implementation
+        return super().should_process_file(file_path)
+
+    # =========================================================================
+    # Office-specific methods
+    # =========================================================================
 
     def _get_pandoc_path(self) -> Optional[str]:
         """
@@ -224,160 +287,41 @@ class OfficeTracker:
 
         return None
 
-    def _get_ollama_path(self) -> Optional[str]:
+    def _convert_with_pandoc(self, input_path: str) -> Optional[str]:
         """
-        Find the ollama binary path.
-
-        Returns:
-            Path to ollama binary or None
-        """
-        paths = [
-            "ollama",
-            "/usr/local/bin/ollama",
-            "/opt/homebrew/bin/ollama",
-            "/Applications/Ollama.app/Contents/Resources/ollama",
-        ]
-
-        for path in paths:
-            try:
-                result = subprocess.run(
-                    [path, "--version"], capture_output=True, timeout=2
-                )
-                if result.returncode == 0:
-                    return path
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
-
-        return None
-
-    def _check_ollama(self) -> bool:
-        """
-        Check if Ollama is available on the system.
-
-        Returns:
-            True if Ollama is available and model exists
-        """
-        self.ollama_path = self._get_ollama_path()
-
-        if not self.ollama_path:
-            return False
-
-        try:
-            result = subprocess.run(
-                [self.ollama_path, "list"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                if self.ollama_model in result.stdout:
-                    return True
-                # Try to pull the model
-                self.logger.info(f"Pulling Ollama model: {self.ollama_model}")
-                pull_result = subprocess.run(
-                    [self.ollama_path, "pull", self.ollama_model],
-                    capture_output=True,
-                    timeout=300,
-                )
-                return pull_result.returncode == 0
-            return False
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-            return False
-
-    def _guess_title_from_filename(self, filename: str) -> str:
-        """
-        Use Ollama to guess a clean title/author from the document filename.
+        Convert Office document to markdown using pandoc.
 
         Args:
-            filename: The document filename (without path or extension)
+            input_path: Path to input document
 
         Returns:
-            A clean, speakable title string
+            Markdown content as string, or None on failure
         """
-        if not self.ollama_available:
-            return filename.replace("_", " ").replace("-", " ").strip()
-
-        prompt = f"""Given this document filename, extract the likely title and author (if present).
-Return ONLY a clean, speakable phrase suitable for text-to-speech.
-
-Examples:
-- "meeting_notes_q3_2024_final_v2" → "Meeting Notes Q3 2024"
-- "John_Smith_Resume_2024" → "Resume by John Smith"
-- "project_proposal_acme_corp" → "Project Proposal for Acme Corp"
-
-Filename: {filename}
-
-Clean title:"""
+        if not self.pandoc_path:
+            self.logger.error("Pandoc not available for conversion")
+            return None
 
         try:
+            # Use pandoc to convert to markdown
             result = subprocess.run(
-                [self.ollama_path, "run", self.ollama_model, prompt],
+                [self.pandoc_path, input_path, "-t", "markdown", "--wrap=none"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=60,
             )
 
             if result.returncode == 0:
-                clean_title = result.stdout.strip().strip("\"'")
-                if clean_title and len(clean_title) < 200:
-                    return clean_title
+                return result.stdout
+            else:
+                self.logger.error(f"Pandoc conversion failed: {result.stderr}")
+                return None
 
-        except (subprocess.TimeoutExpired, Exception) as e:
-            self.logger.debug(f"Title extraction failed: {e}")
-
-        return filename.replace("_", " ").replace("-", " ").strip()
-
-    def _send_broca_notification(self, message: str) -> bool:
-        """
-        Send a notification message to Broca for TTS.
-
-        Args:
-            message: Text to speak
-
-        Returns:
-            True if message was sent successfully
-        """
-        if not self.broca_producer:
-            return False
-
-        try:
-            msg = {
-                "text": message,
-                "id": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
-            }
-            future = self.broca_producer.send(self.broca_topic, value=msg)
-            future.get(timeout=5)
-            self.logger.debug(f"Sent Broca notification: {message}")
-            return True
-
-        except KafkaError as e:
-            self.logger.warning(f"Failed to send Broca notification: {e}")
-            return False
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Pandoc conversion timed out for: {input_path}")
+            return None
         except Exception as e:
-            self.logger.warning(f"Unexpected error sending to Broca: {e}")
-            return False
-
-    def find_office_files(self) -> List[str]:
-        """
-        Find all Office documents in the input directory.
-
-        Returns:
-            List of absolute file paths
-        """
-        office_files = []
-        input_path = Path(self.input_dir)
-
-        for ext in self.EXTENSIONS:
-            # Check lowercase extension
-            for doc_file in input_path.rglob(f"*{ext}"):
-                if doc_file.is_file():
-                    office_files.append(str(doc_file.absolute()))
-
-            # Check uppercase extension
-            for doc_file in input_path.rglob(f"*{ext.upper()}"):
-                if doc_file.is_file():
-                    file_path = str(doc_file.absolute())
-                    if file_path not in office_files:
-                        office_files.append(file_path)
-
-        return office_files
+            self.logger.error(f"Pandoc conversion error: {e}")
+            return None
 
     def _extract_metadata_docx(self, docx_path: str) -> Dict[str, str]:
         """
@@ -534,407 +478,6 @@ Clean title:"""
             "keywords": ["unknown"],
         }
 
-    def _extract_metadata(self, file_path: str) -> Dict[str, str]:
-        """
-        Extract metadata from an Office document based on its extension.
-
-        Args:
-            file_path: Path to document
-
-        Returns:
-            Dictionary containing metadata fields
-        """
-        ext = Path(file_path).suffix.lower()
-
-        if ext == ".docx":
-            return self._extract_metadata_docx(file_path)
-        elif ext == ".odt":
-            return self._extract_metadata_odt(file_path)
-        elif ext == ".doc":
-            return self._extract_metadata_doc(file_path)
-        else:
-            return {
-                "title": Path(file_path).stem,
-                "author": "unknown",
-                "publish_date": "unknown",
-                "keywords": ["unknown"],
-            }
-
-    def _convert_with_pandoc(self, input_path: str) -> Optional[str]:
-        """
-        Convert Office document to markdown using pandoc.
-
-        Args:
-            input_path: Path to input document
-
-        Returns:
-            Markdown content as string, or None on failure
-        """
-        if not self.pandoc_path:
-            self.logger.error("Pandoc not available for conversion")
-            return None
-
-        try:
-            # Use pandoc to convert to markdown
-            result = subprocess.run(
-                [self.pandoc_path, input_path, "-t", "markdown", "--wrap=none"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.returncode == 0:
-                return result.stdout
-            else:
-                self.logger.error(f"Pandoc conversion failed: {result.stderr}")
-                return None
-
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"Pandoc conversion timed out for: {input_path}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Pandoc conversion error: {e}")
-            return None
-
-    def _is_content_substantial(self, text: str) -> bool:
-        """
-        Determine if content meets minimum quality thresholds.
-
-        Args:
-            text: Text to analyze
-
-        Returns:
-            True if content meets minimum thresholds
-        """
-        if not text or not text.strip():
-            return False
-
-        cleaned_text = text.strip()
-
-        # Check minimum length
-        if len(cleaned_text) < self.min_content_chars:
-            return False
-
-        # Check for minimum number of words
-        words = re.findall(r"\b\w+\b", cleaned_text)
-        if len(words) < 10:
-            return False
-
-        return True
-
-    def _is_boilerplate_content_llm(self, text: str) -> Tuple[bool, str]:
-        """
-        Use local LLM to determine if content is boilerplate.
-
-        Args:
-            text: Text to evaluate
-
-        Returns:
-            Tuple of (is_boilerplate, content_type)
-        """
-        if not self.ollama_available:
-            return False, "unknown"
-
-        text_sample = text[:800] if len(text) > 800 else text
-
-        prompt = f"""Analyze this content from a document. Classify it:
-
-TOC - Table of contents
-COPYRIGHT - Copyright notices, legal disclaimers
-SUBSTANTIVE - Actual document content worth keeping
-UNKNOWN - Cannot determine
-
-Content:
-{text_sample}
-
-Respond with ONLY one word: TOC, COPYRIGHT, SUBSTANTIVE, or UNKNOWN"""
-
-        try:
-            result = subprocess.run(
-                [self.ollama_path, "run", self.ollama_model, prompt],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                response = result.stdout.strip().upper()
-
-                if "TOC" in response or "TABLE OF CONTENTS" in response:
-                    return True, "toc"
-                elif "COPYRIGHT" in response:
-                    return True, "copyright"
-                elif "SUBSTANTIVE" in response:
-                    return False, "substantive"
-
-            return False, "unknown"
-
-        except (subprocess.TimeoutExpired, Exception) as e:
-            self.logger.debug(f"LLM boilerplate check failed: {e}")
-            return False, "unknown"
-
-    def _normalize_text(self, text: str) -> str:
-        """
-        Normalize text by removing artifacts and excessive whitespace.
-
-        Args:
-            text: Text to normalize
-
-        Returns:
-            Cleaned text
-        """
-        # Remove form feed characters
-        text = text.replace("\f", "\n")
-
-        # Normalize whitespace
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
-
-        return text.strip()
-
-    def office_to_markdown(self, file_path: str) -> str:
-        """
-        Convert Office document to markdown with metadata.
-
-        Args:
-            file_path: Path to document
-
-        Returns:
-            Markdown formatted text
-        """
-        markdown_parts = []
-
-        # Extract metadata
-        metadata = self._extract_metadata(file_path)
-
-        # Convert document content with pandoc
-        content = self._convert_with_pandoc(file_path)
-
-        if not content:
-            self.logger.warning(f"No content extracted from: {file_path}")
-            content = "_Document conversion failed or document is empty._\n"
-
-        # Normalize content
-        content = self._normalize_text(content)
-
-        # Check if content is substantial
-        if not self._is_content_substantial(content):
-            self.logger.warning(f"Content below minimum threshold: {file_path}")
-
-        # Check for boilerplate using LLM
-        if self.ollama_available and content:
-            is_boilerplate, content_type = self._is_boilerplate_content_llm(content)
-            if is_boilerplate:
-                self.logger.info(
-                    f"Content detected as {content_type}, but including anyway"
-                )
-
-        # Build markdown with YAML frontmatter
-        if self.include_metadata:
-            markdown_parts.append("---\n")
-            markdown_parts.append(f'title: "{metadata["title"]}"\n')
-            markdown_parts.append(f'author: "{metadata["author"]}"\n')
-            markdown_parts.append(f'publish_date: "{metadata["publish_date"]}"\n')
-
-            if len(metadata["keywords"]) == 1:
-                markdown_parts.append(f'keywords: ["{metadata["keywords"][0]}"]\n')
-            else:
-                markdown_parts.append("keywords:\n")
-                for keyword in metadata["keywords"]:
-                    markdown_parts.append(f'  - "{keyword}"\n')
-
-            markdown_parts.append("---\n\n")
-            markdown_parts.append(f"# {metadata['title']}\n\n")
-        else:
-            markdown_parts.append(f"# {Path(file_path).stem}\n\n")
-            markdown_parts.append("---\n\n")
-
-        markdown_parts.append(content)
-
-        return "".join(markdown_parts)
-
-    def should_process_file(self, file_path: str) -> bool:
-        """
-        Determine if a document should be processed.
-
-        Args:
-            file_path: Path to document
-
-        Returns:
-            True if file should be processed
-        """
-        if not os.path.exists(file_path):
-            return False
-
-        # Check if pandoc is available
-        if not self.pandoc_path:
-            return False
-
-        # Check if filename matches force reprocess pattern
-        if self.force_reprocess_regex:
-            filename = Path(file_path).name
-            if self.force_reprocess_regex.search(filename):
-                self.logger.info(f"Force reprocessing (matches pattern): {filename}")
-                return True
-
-        if not self.file_tracker.is_file_processed(file_path):
-            return True
-
-        if self.reprocess_on_change:
-            return self.file_tracker.has_file_changed(file_path)
-
-        return False
-
-    def process_office(self, file_path: str) -> bool:
-        """
-        Process a single Office document.
-
-        Args:
-            file_path: Path to document
-
-        Returns:
-            True if processing succeeded
-        """
-        try:
-            self.logger.info(f"Processing: {file_path}")
-
-            # Send notification to Broca when starting to process
-            if self.notify_broca and self.broca_producer:
-                filename = Path(file_path).stem
-                clean_title = self._guess_title_from_filename(filename)
-                notification = f"Now processing: {clean_title}"
-                self._send_broca_notification(notification)
-
-            # Convert to markdown
-            markdown_content = self.office_to_markdown(file_path)
-
-            if not markdown_content.strip():
-                self.logger.warning(f"No content extracted from: {file_path}")
-                return False
-
-            # Generate output filename
-            doc_filename = Path(file_path).stem
-            output_path = os.path.join(self.output_dir, f"{doc_filename}.md")
-
-            # Write markdown file
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(markdown_content)
-
-            # Mark as processed
-            self.file_tracker.mark_processed(file_path, chunk_count=0, status="success")
-
-            self.logger.info(
-                f"Successfully converted {Path(file_path).name} -> {Path(output_path).name}"
-            )
-
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error processing {file_path}: {e}", exc_info=True)
-            try:
-                self.file_tracker.mark_processed(
-                    file_path, chunk_count=0, status="error"
-                )
-            except Exception:
-                pass
-
-            return False
-
-    def run_single_scan(self) -> Dict[str, int]:
-        """
-        Run a single scan of the input directory.
-
-        Returns:
-            Dictionary with scan statistics
-        """
-        stats = {
-            "files_found": 0,
-            "files_processed": 0,
-            "files_skipped": 0,
-            "files_failed": 0,
-        }
-
-        # Find all Office documents
-        office_files = self.find_office_files()
-        stats["files_found"] = len(office_files)
-
-        if not office_files:
-            self.logger.debug(f"No Office documents found in {self.input_dir}")
-            return stats
-
-        # Process each file
-        for file_path in office_files:
-            if self.should_process_file(file_path):
-                if self.process_office(file_path):
-                    stats["files_processed"] += 1
-                else:
-                    stats["files_failed"] += 1
-            else:
-                stats["files_skipped"] += 1
-                self.logger.debug(f"Skipping (already processed): {file_path}")
-
-        return stats
-
-    def run_continuous(self):
-        """
-        Run continuous monitoring loop.
-        """
-        self.logger.info(
-            f"Starting continuous Office document monitoring "
-            f"(poll interval: {self.poll_interval}s)"
-        )
-        self.logger.info("Press Ctrl+C to stop")
-
-        scan_count = 0
-
-        try:
-            while True:
-                scan_count += 1
-                self.logger.debug(f"Scan #{scan_count}")
-
-                stats = self.run_single_scan()
-
-                if stats["files_processed"] > 0 or stats["files_failed"] > 0:
-                    self.logger.info(
-                        f"Scan #{scan_count} complete: "
-                        f"{stats['files_processed']} processed, "
-                        f"{stats['files_failed']} failed, "
-                        f"{stats['files_skipped']} skipped"
-                    )
-
-                    # Show tracker statistics
-                    tracker_stats = self.file_tracker.get_statistics()
-                    self.logger.info(
-                        f"Total: {tracker_stats['total_files']} documents processed"
-                    )
-
-                # Wait before next scan
-                time.sleep(self.poll_interval)
-
-        except KeyboardInterrupt:
-            self.logger.info("\nShutting down gracefully...")
-            self._shutdown()
-
-    def _shutdown(self):
-        """Cleanup and shutdown."""
-        stats = self.file_tracker.get_statistics()
-        self.logger.info("\n" + "=" * 60)
-        self.logger.info("Final Statistics:")
-        self.logger.info(f"  Total documents processed: {stats['total_files']}")
-        self.logger.info(f"  Successful: {stats['successful']}")
-        self.logger.info(f"  Errors: {stats['errors']}")
-        self.logger.info("=" * 60)
-
-        # Cleanup Kafka producer
-        if self.broca_producer:
-            try:
-                self.broca_producer.flush()
-                self.broca_producer.close()
-            except Exception:
-                pass
-
-        self.logger.info("Office Tracker stopped")
-
 
 def main():
     """Main entry point."""
@@ -971,8 +514,8 @@ Note: When --force-reprocess is provided, the script runs once and exits.
     parser.add_argument(
         "--input-dir",
         type=str,
-        default="~/Documents/AI_IN",
-        help="Directory to monitor for documents (default: ~/Documents/AI_IN)",
+        default=None,
+        help="Directory to monitor for documents (default: from config)",
     )
 
     parser.add_argument(
@@ -984,8 +527,8 @@ Note: When --force-reprocess is provided, the script runs once and exits.
     parser.add_argument(
         "--poll-interval",
         type=int,
-        default=5,
-        help="Seconds between directory scans (default: 5)",
+        default=None,
+        help="Seconds between directory scans (default: from config)",
     )
 
     parser.add_argument(
@@ -1000,10 +543,6 @@ Note: When --force-reprocess is provided, the script runs once and exits.
         tracker = OfficeTracker(
             input_dir=args.input_dir,
             poll_interval=args.poll_interval,
-            reprocess_on_change=True,
-            min_content_chars=100,
-            use_ollama=True,
-            ollama_model="llama3.2:1b",
             include_metadata=not args.no_metadata,
             force_reprocess_pattern=args.force_reprocess,
             notify_broca=not args.no_notify,
