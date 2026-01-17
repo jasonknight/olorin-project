@@ -600,6 +600,41 @@ The project uses pytest with fixtures. Test structure:
 **Exo connection errors**: Start Exo before running Cortex consumer
 **Timestamp errors in Kafka**: The producers use broker-assigned timestamps to avoid clock skew
 
+### RAG Context Injection
+
+**IMPORTANT**: When injecting RAG context into LLM prompts, the message format matters significantly. Different models handle context differently.
+
+**Correct format** (works reliably across all tested models and backends):
+```
+user: [context + question combined in single message]
+```
+
+Example:
+```
+Use the following reference context to answer my question.
+
+<context>
+[document chunks here]
+</context>
+
+Question: What year was Caesar born?
+```
+
+**Broken format** (causes context loss with Deepseek R1 and similar models):
+```
+user: [context]
+assistant: "I understand, I'll use this context..."
+user: [question]
+```
+
+**Why**: Some models (notably Deepseek R1) lose awareness of earlier messages when an assistant message appears between context and question. The assistant "acknowledgment" message causes the model to effectively "forget" the context, responding with "no context was provided" even when 200K+ characters of context exist in the conversation. Even splitting into two consecutive user messages can cause issues with some models.
+
+**Implementation**: Context injection is handled in `cortex/consumer.py` via `_format_context_with_prompt()`. The function combines context and prompt into a single user message with context wrapped in `<context>` tags. This single-message format works reliably across Ollama, EXO, and various model architectures.
+
+**Model capabilities caching**: The cortex consumer caches model capabilities (context length, sliding window) in memory. When switching models, ensure the cache is invalidated by checking if `model_id` matches the current model. Stale cached data from a previous model (e.g., gemma3's 1024-token sliding window) can cause incorrect warnings for the new model.
+
+**Sliding window attention**: Some models (e.g., Gemma, some Mistral variants) use sliding window attention which limits effective context to only the last N tokens during generation. Query model capabilities via Ollama's `/api/show` endpoint to detect this. Models with sliding window are unsuitable for large RAG contexts - the context at the beginning of the conversation becomes invisible during generation.
+
 ## Project Naming
 
 Components are named after brain regions:

@@ -485,9 +485,16 @@ class ExoConsumer:
         Returns:
             Tuple of (fits: bool, warning_message: Optional[str])
         """
-        # Use cached capabilities or fetch if needed
-        if self._model_capabilities is None:
-            self.check_model_capabilities(model)
+        # Determine which model we're validating against
+        model_to_check = model or self.inference.get_running_model()
+
+        # Refresh capabilities if cache is empty or model has changed
+        cache_stale = (
+            self._model_capabilities is None
+            or self._model_capabilities.model_id != model_to_check
+        )
+        if cache_stale:
+            self.check_model_capabilities(model_to_check)
 
         if self._model_capabilities is None:
             return (True, None)  # Can't validate, assume OK
@@ -708,20 +715,24 @@ class ExoConsumer:
             logger.error(f"[{thread_name}] Failed to reset conversation: {e}")
             return False
 
-    def _format_context_as_exchange(self, context_chunks: list[dict]) -> list[dict]:
+    def _format_context_with_prompt(
+        self, context_chunks: list[dict], prompt: str
+    ) -> str:
         """
-        Format RAG context chunks as a user/assistant exchange for injection.
+        Format RAG context chunks combined with the user prompt into a single message.
 
-        Returns two messages:
-        1. User message presenting the context
-        2. Assistant acknowledgment
+        Combining context and prompt in one message is more robust across different
+        models. Some models (e.g., Deepseek R1) lose context awareness when messages
+        are split, even with consecutive user messages. A single combined message
+        works reliably across Ollama, EXO, and various model architectures.
 
         Args:
             context_chunks: List of context dicts with 'content', 'source', etc.
                            May include 'is_manual' flag to distinguish manually selected context.
+            prompt: The user's question/prompt to append after context.
 
         Returns:
-            List of two message dicts [user_msg, assistant_msg]
+            Combined message string with context and prompt
         """
         # Separate manual and auto context for clearer presentation
         manual_chunks = [c for c in context_chunks if c.get("is_manual")]
@@ -765,20 +776,15 @@ class ExoConsumer:
 
         context_block = "\n\n".join(context_parts)
 
-        user_context_message = f"""Based on my knowledge base, here is relevant context that may help answer my upcoming question:
+        # Single combined message with context + prompt
+        # This format works reliably across all tested models and backends
+        return f"""Use the following reference context to answer my question.
 
----
+<context>
 {context_block}
----"""
+</context>
 
-        assistant_ack = (
-            "I understand. I'll use this context to help answer your questions."
-        )
-
-        return [
-            {"role": "user", "content": user_context_message},
-            {"role": "assistant", "content": assistant_ack},
-        ]
+Question: {prompt}"""
 
     def _build_tool_system_prompt(self) -> str | None:
         """
@@ -880,8 +886,11 @@ When you decide to use a tool, call it with the required parameters. After the t
         # If chat history is disabled, just return the current prompt
         if self.chat_store is None:
             if context_chunks:
-                messages.extend(self._format_context_as_exchange(context_chunks))
-            messages.append({"role": "user", "content": prompt})
+                # Combine context and prompt into single message
+                combined = self._format_context_with_prompt(context_chunks, prompt)
+                messages.append({"role": "user", "content": combined})
+            else:
+                messages.append({"role": "user", "content": prompt})
             logger.info(
                 f"[{thread_name}] Chat history disabled, built {len(messages)} message(s)"
             )
@@ -930,19 +939,19 @@ When you decide to use a tool, call it with the required parameters. After the t
                         f"[{thread_name}] Filtered out {filtered_count} already-injected context chunks"
                     )
 
-            # Add context injection (only NEW context not already in history)
+            # Build the user message - combine context + prompt if context exists
             if new_context_chunks:
-                context_exchange = self._format_context_as_exchange(new_context_chunks)
-                messages.extend(context_exchange)
+                # Combine context and prompt into single message for better model compatibility
+                combined_content = self._format_context_with_prompt(
+                    new_context_chunks, prompt
+                )
+                messages.append({"role": "user", "content": combined_content})
                 logger.info(
-                    f"[{thread_name}] Injected RAG context as user/assistant exchange"
+                    f"[{thread_name}] Combined {len(new_context_chunks)} context chunks with prompt into single message"
                 )
 
-                # Store context exchange in chat history so it persists for follow-up questions
-                # This ensures the LLM has access to context in subsequent turns
+                # Store in chat history with context metadata for audit trail
                 try:
-                    # Build metadata with context chunk info for audit trail
-                    # Use new_context_chunks (filtered) to track what was actually injected
                     context_metadata = {
                         "context_ids": [
                             ctx.get("id") for ctx in new_context_chunks if ctx.get("id")
@@ -958,40 +967,34 @@ When you decide to use a tool, call it with the required parameters. After the t
                             if ctx.get("distance") is not None
                         ],
                         "chunk_count": len(new_context_chunks),
+                        "original_prompt": prompt,  # Store original prompt separately for reference
                     }
                     self.chat_store.add_user_message(
                         conversation_id,
-                        context_exchange[0]["content"],
-                        prompt_id=f"{message_id}_context",
-                        message_type="context_user",
+                        combined_content,
+                        prompt_id=message_id,
+                        message_type="context_with_prompt",
                         metadata=context_metadata,
                     )
-                    self.chat_store.add_assistant_message(
-                        conversation_id,
-                        context_exchange[1]["content"],
-                        message_type="context_ack",
-                    )
                     logger.info(
-                        f"[{thread_name}] Stored context exchange in chat history for conversation continuity"
+                        f"[{thread_name}] Stored combined context+prompt in chat history"
                     )
                 except Exception as e:
                     logger.warning(
-                        f"[{thread_name}] Failed to store context in chat history: {e}"
+                        f"[{thread_name}] Failed to store message in chat history: {e}"
                     )
-
-            # Add current user prompt
-            messages.append({"role": "user", "content": prompt})
-
-            # Store the user message in chat history
-            self.chat_store.add_user_message(
-                conversation_id, prompt, prompt_id=message_id
-            )
+            else:
+                # No context - just add the prompt
+                messages.append({"role": "user", "content": prompt})
+                self.chat_store.add_user_message(
+                    conversation_id, prompt, prompt_id=message_id
+                )
 
             logger.info(
                 f"[{thread_name}] Built messages array with {len(messages)} total messages"
             )
             logger.info(
-                f"[{thread_name}]   - System: {1 if tool_system_prompt else 0}, History: {len(history)}, Context exchange: {2 if new_context_chunks else 0}, New prompt: 1"
+                f"[{thread_name}]   - System: {1 if tool_system_prompt else 0}, History: {len(history)}, Context+Prompt: {1 if new_context_chunks else 0}, Prompt only: {0 if new_context_chunks else 1}"
             )
             return messages
 
@@ -1005,8 +1008,11 @@ When you decide to use a tool, call it with the required parameters. After the t
             if tool_system_prompt:
                 messages.append({"role": "system", "content": tool_system_prompt})
             if context_chunks:
-                messages.extend(self._format_context_as_exchange(context_chunks))
-            messages.append({"role": "user", "content": prompt})
+                # Combine context and prompt into single message
+                combined = self._format_context_with_prompt(context_chunks, prompt)
+                messages.append({"role": "user", "content": combined})
+            else:
+                messages.append({"role": "user", "content": prompt})
             logger.warning(
                 f"[{thread_name}] Fallback: built {len(messages)} message(s) without history"
             )

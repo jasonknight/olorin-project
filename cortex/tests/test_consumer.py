@@ -123,15 +123,16 @@ class TestContextFormatting:
                 }
             ]
 
-            messages = consumer._format_context_as_exchange(chunks)
+            combined = consumer._format_context_with_prompt(chunks, "What is Python?")
 
-            assert len(messages) == 2
-            assert messages[0]["role"] == "user"
-            assert messages[1]["role"] == "assistant"
-            assert "Python is a programming language." in messages[0]["content"]
-            assert "docs.md" in messages[0]["content"]
-            assert "Introduction" in messages[0]["content"]
-            assert "I understand" in messages[1]["content"]
+            # Should return a single combined string
+            assert isinstance(combined, str)
+            assert "Python is a programming language." in combined
+            assert "docs.md" in combined
+            assert "Introduction" in combined
+            assert "What is Python?" in combined
+            assert "<context>" in combined
+            assert "</context>" in combined
 
     def test_format_multiple_context_chunks(self, mock_config):
         """Should format multiple context chunks correctly."""
@@ -163,13 +164,16 @@ class TestContextFormatting:
                 },
             ]
 
-            messages = consumer._format_context_as_exchange(chunks)
+            combined = consumer._format_context_with_prompt(
+                chunks, "Summarize the content"
+            )
 
-            assert len(messages) == 2
-            assert "First chunk" in messages[0]["content"]
-            assert "Second chunk" in messages[0]["content"]
-            assert "file1.md" in messages[0]["content"]
-            assert "file2.md" in messages[0]["content"]
+            assert isinstance(combined, str)
+            assert "First chunk" in combined
+            assert "Second chunk" in combined
+            assert "file1.md" in combined
+            assert "file2.md" in combined
+            assert "Summarize the content" in combined
 
     def test_format_context_with_missing_metadata(self, mock_config):
         """Should handle chunks with missing metadata gracefully."""
@@ -186,10 +190,11 @@ class TestContextFormatting:
 
             chunks = [{"content": "Content only"}]  # No source, h1, etc.
 
-            messages = consumer._format_context_as_exchange(chunks)
+            combined = consumer._format_context_with_prompt(chunks, "What is this?")
 
-            assert len(messages) == 2
-            assert "Content only" in messages[0]["content"]
+            assert isinstance(combined, str)
+            assert "Content only" in combined
+            assert "What is this?" in combined
 
 
 class TestMessageHistoryBuilding:

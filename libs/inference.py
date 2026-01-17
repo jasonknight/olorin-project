@@ -28,6 +28,36 @@ Usage:
     if client.supports_tools():
         # Enable tools
         pass
+
+RAG Context Injection Notes:
+    When injecting RAG context into messages, the format matters significantly
+    for model comprehension. The most robust approach is combining context and
+    question in a SINGLE message.
+
+    BEST (single combined message - works across all tested models):
+        messages = [
+            {"role": "user", "content": "Use this context:\\n<context>...</context>\\n\\nQuestion: X?"}
+        ]
+
+    BROKEN (assistant ack causes context loss with Deepseek R1 and others):
+        messages = [
+            {"role": "user", "content": "Here is context: ..."},
+            {"role": "assistant", "content": "I understand..."},  # BAD!
+            {"role": "user", "content": "What does the context say about X?"}
+        ]
+
+    The assistant acknowledgment message causes models like Deepseek R1 to
+    "forget" the context, responding with "no context was provided" even
+    when 200K+ characters of context exist in the conversation. Even splitting
+    into separate user messages can cause issues with some models.
+
+    The single-message approach works reliably across Ollama, EXO, and various
+    model architectures.
+
+Model Capabilities Caching:
+    When caching model capabilities (context length, sliding window), always
+    verify the cached model_id matches the current model before using cached
+    values. Stale data from a previous model can cause incorrect behavior.
 """
 
 import logging
@@ -87,6 +117,28 @@ class ModelCapabilities:
 
     Used to detect potential context overflow issues before they cause
     silent failures (like sliding window attention truncation).
+
+    IMPORTANT - Sliding Window Attention:
+        Some models (e.g., Gemma, some Mistral variants) use sliding window
+        attention, which means they can only "see" the last N tokens during
+        generation, even if more tokens fit in the context window.
+
+        For RAG use cases, this is CRITICAL: if you inject 50K tokens of
+        context at the START of the conversation, a model with 1024-token
+        sliding window will NOT be able to see any of it when generating
+        a response. The model will claim "no context was provided" even
+        though the context is technically in the conversation.
+
+        Always check has_sliding_window before using a model for RAG with
+        large context. Models with sliding window are unsuitable for RAG
+        unless the context fits within the sliding window size.
+
+    Caching Warning:
+        When caching ModelCapabilities, always verify model_id matches the
+        current model before using cached values. Different models have
+        vastly different capabilities (e.g., gemma3 has 1024 sliding window,
+        deepseek-r1 has 128K full context). Using stale cached data causes
+        incorrect warnings or silent failures.
     """
 
     model_id: str
