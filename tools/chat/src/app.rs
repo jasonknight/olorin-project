@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use olorin_state::State;
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -50,6 +51,14 @@ pub enum SearchFocus {
     #[default]
     Input,
     Results,
+}
+
+/// Focus state for manual entry modal fields
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ManualEntryFocus {
+    #[default]
+    Text,
+    Source,
 }
 
 /// Search mode: semantic (embeddings) or source (filename match)
@@ -105,6 +114,22 @@ pub struct SearchState {
     pub context_ids: std::collections::HashSet<String>,
     /// Token count for documents in context
     pub context_token_count: usize,
+    /// Whether showing manual entry modal
+    pub showing_manual_entry: bool,
+    /// Manual entry text content
+    pub manual_entry_text: String,
+    /// Manual entry source (defaults to "User Context")
+    pub manual_entry_source: String,
+    /// Current focus in manual entry modal
+    pub manual_entry_focus: ManualEntryFocus,
+    /// Whether manual entry is being submitted (loading)
+    pub manual_entry_loading: bool,
+    /// Cursor position in text field (character index)
+    pub manual_entry_text_cursor: usize,
+    /// Cursor position in source field (character index)
+    pub manual_entry_source_cursor: usize,
+    /// Scroll offset for text field (lines from top, uses Cell for interior mutability during render)
+    pub manual_entry_scroll_offset: std::cell::Cell<usize>,
 }
 
 /// Messages sent from background threads to the main app
@@ -126,6 +151,8 @@ pub struct App<'a> {
     pub input: TextArea<'a>,
     /// Scroll offset for the chat display (lines from bottom)
     pub scroll_offset: usize,
+    /// Scroll offset for the input area (lines from top, uses Cell for interior mutability during render)
+    pub input_scroll_offset: Cell<usize>,
     /// Whether to auto-scroll to bottom when new messages arrive
     pub auto_scroll: bool,
     /// Whether the app should quit
@@ -193,6 +220,7 @@ impl<'a> App<'a> {
             messages: Vec::new(),
             input,
             scroll_offset: 0,
+            input_scroll_offset: Cell::new(0),
             auto_scroll: true,
             should_quit: false,
             producer,
@@ -1020,6 +1048,558 @@ impl<'a> App<'a> {
         self.search_state
             .results
             .get(self.search_state.selected_index)
+    }
+
+    // ==================== Manual Entry Modal Methods ====================
+
+    /// Show the manual entry modal (F3)
+    pub fn show_manual_entry_modal(&mut self) {
+        self.search_state.showing_manual_entry = true;
+        self.search_state.manual_entry_text.clear();
+        self.search_state.manual_entry_source = "User Context".to_string();
+        self.search_state.manual_entry_focus = ManualEntryFocus::Text;
+        self.search_state.manual_entry_loading = false;
+        self.search_state.manual_entry_text_cursor = 0;
+        self.search_state.manual_entry_source_cursor =
+            self.search_state.manual_entry_source.chars().count();
+        self.search_state.manual_entry_scroll_offset.set(0);
+    }
+
+    /// Close the manual entry modal
+    pub fn close_manual_entry_modal(&mut self) {
+        self.search_state.showing_manual_entry = false;
+        self.search_state.manual_entry_text.clear();
+        self.search_state.manual_entry_source.clear();
+        self.search_state.manual_entry_loading = false;
+        self.search_state.manual_entry_text_cursor = 0;
+        self.search_state.manual_entry_source_cursor = 0;
+    }
+
+    /// Toggle focus between text and source fields in manual entry modal
+    pub fn toggle_manual_entry_focus(&mut self) {
+        self.search_state.manual_entry_focus = match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => ManualEntryFocus::Source,
+            ManualEntryFocus::Source => ManualEntryFocus::Text,
+        };
+    }
+
+    /// Handle character input in manual entry modal
+    pub fn manual_entry_input_char(&mut self, c: char) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                let cursor = self.search_state.manual_entry_text_cursor;
+                let byte_pos = self
+                    .search_state
+                    .manual_entry_text
+                    .char_indices()
+                    .nth(cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.search_state.manual_entry_text.len());
+                self.search_state.manual_entry_text.insert(byte_pos, c);
+                self.search_state.manual_entry_text_cursor += 1;
+            }
+            ManualEntryFocus::Source => {
+                let cursor = self.search_state.manual_entry_source_cursor;
+                let byte_pos = self
+                    .search_state
+                    .manual_entry_source
+                    .char_indices()
+                    .nth(cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.search_state.manual_entry_source.len());
+                self.search_state.manual_entry_source.insert(byte_pos, c);
+                self.search_state.manual_entry_source_cursor += 1;
+            }
+        }
+    }
+
+    /// Handle backspace in manual entry modal
+    pub fn manual_entry_input_backspace(&mut self) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                let cursor = self.search_state.manual_entry_text_cursor;
+                if cursor > 0 {
+                    let byte_pos = self
+                        .search_state
+                        .manual_entry_text
+                        .char_indices()
+                        .nth(cursor - 1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.search_state.manual_entry_text.remove(byte_pos);
+                    self.search_state.manual_entry_text_cursor -= 1;
+                }
+            }
+            ManualEntryFocus::Source => {
+                let cursor = self.search_state.manual_entry_source_cursor;
+                if cursor > 0 {
+                    let byte_pos = self
+                        .search_state
+                        .manual_entry_source
+                        .char_indices()
+                        .nth(cursor - 1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.search_state.manual_entry_source.remove(byte_pos);
+                    self.search_state.manual_entry_source_cursor -= 1;
+                }
+            }
+        }
+    }
+
+    /// Handle delete key in manual entry modal
+    pub fn manual_entry_input_delete(&mut self) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                let cursor = self.search_state.manual_entry_text_cursor;
+                let char_count = self.search_state.manual_entry_text.chars().count();
+                if cursor < char_count {
+                    let byte_pos = self
+                        .search_state
+                        .manual_entry_text
+                        .char_indices()
+                        .nth(cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.search_state.manual_entry_text.len());
+                    self.search_state.manual_entry_text.remove(byte_pos);
+                }
+            }
+            ManualEntryFocus::Source => {
+                let cursor = self.search_state.manual_entry_source_cursor;
+                let char_count = self.search_state.manual_entry_source.chars().count();
+                if cursor < char_count {
+                    let byte_pos = self
+                        .search_state
+                        .manual_entry_source
+                        .char_indices()
+                        .nth(cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.search_state.manual_entry_source.len());
+                    self.search_state.manual_entry_source.remove(byte_pos);
+                }
+            }
+        }
+    }
+
+    /// Handle newline in manual entry modal (only for text field)
+    pub fn manual_entry_input_newline(&mut self) {
+        if self.search_state.manual_entry_focus == ManualEntryFocus::Text {
+            let cursor = self.search_state.manual_entry_text_cursor;
+            let byte_pos = self
+                .search_state
+                .manual_entry_text
+                .char_indices()
+                .nth(cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.search_state.manual_entry_text.len());
+            self.search_state.manual_entry_text.insert(byte_pos, '\n');
+            self.search_state.manual_entry_text_cursor += 1;
+        }
+    }
+
+    /// Move cursor left in manual entry modal
+    pub fn manual_entry_cursor_left(&mut self) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                if self.search_state.manual_entry_text_cursor > 0 {
+                    self.search_state.manual_entry_text_cursor -= 1;
+                }
+            }
+            ManualEntryFocus::Source => {
+                if self.search_state.manual_entry_source_cursor > 0 {
+                    self.search_state.manual_entry_source_cursor -= 1;
+                }
+            }
+        }
+    }
+
+    /// Move cursor right in manual entry modal
+    pub fn manual_entry_cursor_right(&mut self) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                let max = self.search_state.manual_entry_text.chars().count();
+                if self.search_state.manual_entry_text_cursor < max {
+                    self.search_state.manual_entry_text_cursor += 1;
+                }
+            }
+            ManualEntryFocus::Source => {
+                let max = self.search_state.manual_entry_source.chars().count();
+                if self.search_state.manual_entry_source_cursor < max {
+                    self.search_state.manual_entry_source_cursor += 1;
+                }
+            }
+        }
+    }
+
+    /// Move cursor up in manual entry modal (text field only)
+    pub fn manual_entry_cursor_up(&mut self) {
+        if self.search_state.manual_entry_focus != ManualEntryFocus::Text {
+            return;
+        }
+
+        let text = &self.search_state.manual_entry_text;
+        let cursor = self.search_state.manual_entry_text_cursor;
+
+        // Find current line and column
+        let mut current_line = 0;
+        let mut current_col = 0;
+        let mut line_start = 0;
+
+        for (i, c) in text.chars().enumerate() {
+            if i == cursor {
+                break;
+            }
+            if c == '\n' {
+                current_line += 1;
+                current_col = 0;
+                line_start = i + 1;
+            } else {
+                current_col += 1;
+            }
+        }
+
+        // If on first line, can't go up
+        if current_line == 0 {
+            return;
+        }
+
+        // Find previous line start and length
+        let mut prev_line_start = 0;
+        let mut prev_line_len = 0;
+        let mut line = 0;
+
+        for (i, c) in text.chars().enumerate() {
+            if line == current_line - 1 {
+                if c == '\n' {
+                    prev_line_len = i - prev_line_start;
+                    break;
+                }
+            } else if c == '\n' {
+                line += 1;
+                if line == current_line - 1 {
+                    prev_line_start = i + 1;
+                }
+            }
+        }
+
+        // Handle case where previous line is the last scanned
+        if line == current_line - 1 && prev_line_len == 0 {
+            prev_line_len = line_start - prev_line_start - 1;
+        }
+
+        // Move to same column on previous line, or end if line is shorter
+        let new_col = current_col.min(prev_line_len);
+        self.search_state.manual_entry_text_cursor = prev_line_start + new_col;
+    }
+
+    /// Move cursor down in manual entry modal (text field only)
+    pub fn manual_entry_cursor_down(&mut self) {
+        if self.search_state.manual_entry_focus != ManualEntryFocus::Text {
+            return;
+        }
+
+        let text = &self.search_state.manual_entry_text;
+        let cursor = self.search_state.manual_entry_text_cursor;
+        let char_count = text.chars().count();
+
+        // Find current column
+        let mut current_col = 0;
+        let mut found_newline_before_cursor = false;
+
+        for (i, c) in text.chars().enumerate() {
+            if i == cursor {
+                break;
+            }
+            if c == '\n' {
+                current_col = 0;
+                found_newline_before_cursor = true;
+            } else {
+                current_col += 1;
+            }
+        }
+
+        // If no newline in text, or cursor is before first newline, start col calculation from 0
+        if !found_newline_before_cursor {
+            current_col = cursor;
+        }
+
+        // Find next line start
+        let mut next_line_start = None;
+
+        for (i, c) in text.chars().enumerate().skip(cursor) {
+            if c == '\n' {
+                next_line_start = Some(i + 1);
+                break;
+            }
+        }
+
+        // If no next line, stay put
+        let Some(next_start) = next_line_start else {
+            return;
+        };
+
+        // Find next line length
+        let mut next_line_len = 0;
+        for (i, c) in text.chars().enumerate().skip(next_start) {
+            if c == '\n' {
+                next_line_len = i - next_start;
+                break;
+            }
+            next_line_len = i - next_start + 1;
+        }
+
+        // Move to same column on next line, or end if line is shorter
+        let new_col = current_col.min(next_line_len);
+        let new_cursor = next_start + new_col;
+        self.search_state.manual_entry_text_cursor = new_cursor.min(char_count);
+    }
+
+    /// Move cursor to start of line in manual entry modal
+    pub fn manual_entry_cursor_home(&mut self) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                let text = &self.search_state.manual_entry_text;
+                let cursor = self.search_state.manual_entry_text_cursor;
+
+                // Find start of current line
+                let mut line_start = 0;
+                for (i, c) in text.chars().enumerate() {
+                    if i == cursor {
+                        break;
+                    }
+                    if c == '\n' {
+                        line_start = i + 1;
+                    }
+                }
+                self.search_state.manual_entry_text_cursor = line_start;
+            }
+            ManualEntryFocus::Source => {
+                self.search_state.manual_entry_source_cursor = 0;
+            }
+        }
+    }
+
+    /// Move cursor to end of line in manual entry modal
+    pub fn manual_entry_cursor_end(&mut self) {
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                let text = &self.search_state.manual_entry_text;
+                let cursor = self.search_state.manual_entry_text_cursor;
+                let char_count = text.chars().count();
+
+                // Find end of current line
+                let mut line_end = char_count;
+                for (i, c) in text.chars().enumerate().skip(cursor) {
+                    if c == '\n' {
+                        line_end = i;
+                        break;
+                    }
+                }
+                self.search_state.manual_entry_text_cursor = line_end;
+            }
+            ManualEntryFocus::Source => {
+                self.search_state.manual_entry_source_cursor =
+                    self.search_state.manual_entry_source.chars().count();
+            }
+        }
+    }
+
+    /// Copy text content to clipboard
+    pub fn manual_entry_copy_to_clipboard(&mut self) {
+        let text = &self.search_state.manual_entry_text;
+        if text.is_empty() {
+            self.status = String::from("Nothing to copy");
+            return;
+        }
+
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(text.clone()) {
+                Ok(()) => {
+                    self.status = format!("Copied {} chars to clipboard", text.chars().count());
+                }
+                Err(e) => {
+                    self.status = format!("Clipboard error: {}", e);
+                }
+            },
+            Err(e) => {
+                self.status = format!("Clipboard unavailable: {}", e);
+            }
+        }
+    }
+
+    /// Paste from clipboard into current field
+    pub fn manual_entry_paste_from_clipboard(&mut self) {
+        let clipboard_text = match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.get_text() {
+                Ok(text) => text,
+                Err(e) => {
+                    self.status = format!("Clipboard read error: {}", e);
+                    return;
+                }
+            },
+            Err(e) => {
+                self.status = format!("Clipboard unavailable: {}", e);
+                return;
+            }
+        };
+
+        if clipboard_text.is_empty() {
+            self.status = String::from("Clipboard is empty");
+            return;
+        }
+
+        match self.search_state.manual_entry_focus {
+            ManualEntryFocus::Text => {
+                // Insert clipboard text at cursor position
+                let cursor = self.search_state.manual_entry_text_cursor;
+                let byte_pos = self
+                    .search_state
+                    .manual_entry_text
+                    .char_indices()
+                    .nth(cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.search_state.manual_entry_text.len());
+                self.search_state
+                    .manual_entry_text
+                    .insert_str(byte_pos, &clipboard_text);
+                self.search_state.manual_entry_text_cursor += clipboard_text.chars().count();
+                self.status = format!("Pasted {} chars", clipboard_text.chars().count());
+            }
+            ManualEntryFocus::Source => {
+                // For source field, only take first line (no newlines allowed)
+                let first_line = clipboard_text.lines().next().unwrap_or("");
+                let cursor = self.search_state.manual_entry_source_cursor;
+                let byte_pos = self
+                    .search_state
+                    .manual_entry_source
+                    .char_indices()
+                    .nth(cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.search_state.manual_entry_source.len());
+                self.search_state
+                    .manual_entry_source
+                    .insert_str(byte_pos, first_line);
+                self.search_state.manual_entry_source_cursor += first_line.chars().count();
+                self.status = format!("Pasted {} chars", first_line.chars().count());
+            }
+        }
+    }
+
+    /// Submit the manual entry to ChromaDB via search tool
+    pub async fn submit_manual_entry(&mut self) {
+        let text = self.search_state.manual_entry_text.trim().to_string();
+        if text.is_empty() {
+            self.status = String::from("Cannot add empty text");
+            return;
+        }
+
+        let source = if self.search_state.manual_entry_source.trim().is_empty() {
+            "User Context".to_string()
+        } else {
+            self.search_state.manual_entry_source.trim().to_string()
+        };
+
+        self.search_state.manual_entry_loading = true;
+        self.status = String::from("Adding to ChromaDB...");
+
+        let url = format!("{}/add", self.search_tool_url);
+        let client = reqwest::Client::new();
+
+        match client
+            .post(&url)
+            .json(&serde_json::json!({
+                "text": text,
+                "source": source
+            }))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(data) => {
+                            if data
+                                .get("success")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                let doc_id = data
+                                    .get("result")
+                                    .and_then(|r| r.get("id"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+
+                                // Calculate tokens for this document
+                                let doc_tokens = tiktoken_rs::cl100k_base()
+                                    .map(|bpe| bpe.encode_with_special_tokens(&text).len())
+                                    .unwrap_or(0);
+
+                                // Add to context_documents SQLite table
+                                if let Ok(conn) = rusqlite::Connection::open(&self.context_db_path)
+                                {
+                                    let _ = conn.execute(
+                                        "CREATE TABLE IF NOT EXISTS context_documents (
+                                            id TEXT PRIMARY KEY,
+                                            text TEXT NOT NULL,
+                                            source TEXT,
+                                            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+                                        )",
+                                        [],
+                                    );
+
+                                    let _ = conn.execute(
+                                        "INSERT OR IGNORE INTO context_documents (id, text, source) VALUES (?1, ?2, ?3)",
+                                        [&doc_id, &text, &source],
+                                    );
+                                }
+
+                                // Create a SearchResult and add to results list
+                                let new_result = SearchResult {
+                                    id: doc_id.clone(),
+                                    text: text.clone(),
+                                    source: Some(source.clone()),
+                                    distance: None,
+                                    is_in_context: true,
+                                };
+
+                                // Insert at the beginning of results so it's visible
+                                self.search_state.results.insert(0, new_result);
+
+                                // Update context tracking
+                                self.search_state.context_ids.insert(doc_id.clone());
+                                self.search_state.context_token_count += doc_tokens;
+
+                                // Select the new entry
+                                self.search_state.selected_index = 0;
+                                self.search_state.scroll_offset = 0;
+
+                                self.status = format!("Added to ChromaDB and context: {}", doc_id);
+                                self.close_manual_entry_modal();
+                            } else {
+                                let error = data
+                                    .get("error")
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("Unknown error");
+                                self.status = format!("Failed: {}", error);
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("JSON error: {}", e);
+                        }
+                    }
+                } else {
+                    self.status = format!("HTTP error: {}", response.status());
+                }
+            }
+            Err(e) => {
+                self.status = format!("Request error: {}", e);
+            }
+        }
+
+        self.search_state.manual_entry_loading = false;
     }
 
     /// Show the quit confirmation modal

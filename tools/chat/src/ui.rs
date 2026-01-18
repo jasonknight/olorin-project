@@ -51,6 +51,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             if app.search_state.showing_help {
                 render_search_help_modal(frame);
             }
+            if app.search_state.showing_manual_entry {
+                render_manual_entry_modal(frame, app);
+            }
         }
     }
 
@@ -413,9 +416,9 @@ fn render_search_display(frame: &mut Frame, app: &App, area: Rect) {
 
     // Render help line at the bottom of results area
     let help_text = if app.search_state.focus == SearchFocus::Input {
-        "Tab: focus results | Enter: search | Esc: quit"
+        "Tab: focus results | Enter: search | F3: add entry | Esc: quit"
     } else {
-        "Tab: focus input | Enter: view | a: add | r: remove | Esc: quit"
+        "Tab: input | Enter: view | a: add | r: remove | F3: new | Esc: quit"
     };
 
     let help_area = Rect {
@@ -670,43 +673,47 @@ fn render_search_help_modal(frame: &mut Frame) {
         Line::from(Span::styled("KEYBOARD SHORTCUTS", header_style)),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  F2    ", key_style),
+            Span::styled("  F2          ", key_style),
             Span::styled("Toggle search mode (Semantic/Source)", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  Tab       ", key_style),
+            Span::styled("  F3          ", key_style),
+            Span::styled("Add manual entry to ChromaDB", text_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab         ", key_style),
             Span::styled("Switch between search input and results", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  Enter     ", key_style),
+            Span::styled("  Enter       ", key_style),
             Span::styled("Execute search / View selected document", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  ↑/↓       ", key_style),
+            Span::styled("  ↑/↓         ", key_style),
             Span::styled("Navigate results", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  PgUp/PgDn ", key_style),
+            Span::styled("  PgUp/PgDn   ", key_style),
             Span::styled("Jump 10 results", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  a         ", key_style),
+            Span::styled("  a           ", key_style),
             Span::styled("Add selected document to context", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  r         ", key_style),
+            Span::styled("  r           ", key_style),
             Span::styled("Remove selected document from context", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  ?         ", key_style),
+            Span::styled("  ?           ", key_style),
             Span::styled("Show this help", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  Esc       ", key_style),
+            Span::styled("  Esc         ", key_style),
             Span::styled("Close modal / Quit", text_style),
         ]),
         Line::from(vec![
-            Span::styled("  Shift+Tab ", key_style),
+            Span::styled("  Shift+Tab   ", key_style),
             Span::styled("Switch to other tabs", text_style),
         ]),
         Line::from(""),
@@ -727,6 +734,347 @@ fn render_search_help_modal(frame: &mut Frame) {
         .style(Style::default().bg(Color::Black));
 
     frame.render_widget(paragraph, inner);
+}
+
+/// Render the manual entry modal for adding documents to ChromaDB
+fn render_manual_entry_modal(frame: &mut Frame, app: &App) {
+    use crate::app::ManualEntryFocus;
+    use ratatui::widgets::Clear;
+
+    let area = frame.area();
+
+    // Create a centered modal taking 80% of width, 70% of height
+    let modal_width = (area.width as f32 * 0.80) as u16;
+    let modal_height = (area.height as f32 * 0.70) as u16;
+    let modal_x = (area.width - modal_width) / 2;
+    let modal_y = (area.height - modal_height) / 2;
+
+    let modal_area = Rect {
+        x: modal_x,
+        y: modal_y,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the modal area
+    frame.render_widget(Clear, modal_area);
+
+    let title = if app.search_state.manual_entry_loading {
+        " Add to ChromaDB (submitting...) "
+    } else {
+        " Add to ChromaDB (F3) "
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Split inner area into sections
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Source field (1 line + border)
+            Constraint::Min(5),    // Text field (multi-line + border)
+            Constraint::Length(2), // Help text
+        ])
+        .split(inner);
+
+    // Render source field
+    let source_border_color = if app.search_state.manual_entry_focus == ManualEntryFocus::Source {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
+    let source_block = Block::default()
+        .title(" Source ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(source_border_color));
+
+    let source_inner = source_block.inner(chunks[0]);
+    frame.render_widget(source_block, chunks[0]);
+
+    // Render source with visible cursor
+    let source_text = &app.search_state.manual_entry_source;
+    let source_cursor = app.search_state.manual_entry_source_cursor;
+    let source_focused = app.search_state.manual_entry_focus == ManualEntryFocus::Source;
+
+    let source_line = if source_text.is_empty() {
+        if source_focused {
+            Line::from(vec![
+                Span::styled("│", Style::default().fg(Color::Yellow)),
+                Span::styled("User Context", Style::default().fg(Color::DarkGray)),
+            ])
+        } else {
+            Line::from(Span::styled(
+                "User Context",
+                Style::default().fg(Color::DarkGray),
+            ))
+        }
+    } else {
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, c) in source_text.chars().enumerate() {
+            if source_focused && i == source_cursor {
+                spans.push(Span::styled("│", Style::default().fg(Color::Yellow)));
+            }
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default().fg(Color::White),
+            ));
+        }
+        // Cursor at end
+        if source_focused && source_cursor >= source_text.chars().count() {
+            spans.push(Span::styled("│", Style::default().fg(Color::Yellow)));
+        }
+        Line::from(spans)
+    };
+
+    let source_paragraph = Paragraph::new(source_line);
+    frame.render_widget(source_paragraph, source_inner);
+
+    // Render text field
+    let text_border_color = if app.search_state.manual_entry_focus == ManualEntryFocus::Text {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
+    let text_block = Block::default()
+        .title(" Text Content ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(text_border_color));
+
+    let text_inner = text_block.inner(chunks[1]);
+    frame.render_widget(text_block, chunks[1]);
+
+    // Render text with visible cursor and scrolling support
+    let text = &app.search_state.manual_entry_text;
+    let cursor_pos = app.search_state.manual_entry_text_cursor;
+    let is_focused = app.search_state.manual_entry_focus == ManualEntryFocus::Text;
+    let wrap_width = text_inner.width as usize;
+
+    // Helper function for character-based wrapping (same as in render_input_area)
+    fn wrap_line_manual(line: &str, width: usize) -> Vec<String> {
+        if line.is_empty() || width == 0 {
+            return vec![line.to_string()];
+        }
+        let mut wrapped = Vec::new();
+        let mut current = String::new();
+        let mut current_width = 0;
+
+        for ch in line.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if current_width + ch_width > width && !current.is_empty() {
+                wrapped.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += ch_width;
+        }
+        if !current.is_empty() || wrapped.is_empty() {
+            wrapped.push(current);
+        }
+        wrapped
+    }
+
+    // Build wrapped display with cursor
+    let text_content: Text = if text.is_empty() {
+        if is_focused {
+            Text::from(Line::from(vec![
+                Span::styled("│", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "Enter text content...",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        } else {
+            Text::from(Span::styled(
+                "Enter text content for the document...",
+                Style::default().fg(Color::DarkGray),
+            ))
+        }
+    } else if wrap_width == 0 {
+        Text::from("")
+    } else {
+        // Split text by newlines, wrap each logical line, then build display
+        let logical_lines: Vec<&str> = text.split('\n').collect();
+        let mut all_wrapped_lines: Vec<String> = Vec::new();
+
+        for logical_line in &logical_lines {
+            let wrapped = wrap_line_manual(logical_line, wrap_width);
+            all_wrapped_lines.extend(wrapped);
+        }
+
+        // Now build the styled text with cursor inserted at the visual position
+        // We need to map cursor_pos (character index in original text) to visual position
+        let mut visual_lines: Vec<Line> = Vec::new();
+        let mut char_idx = 0;
+
+        for (logical_line_idx, logical_line) in logical_lines.iter().enumerate() {
+            let wrapped_parts = wrap_line_manual(logical_line, wrap_width);
+
+            for wrapped_part in &wrapped_parts {
+                let mut line_spans: Vec<Span> = Vec::new();
+
+                for ch in wrapped_part.chars() {
+                    if is_focused && char_idx == cursor_pos {
+                        line_spans.push(Span::styled("│", Style::default().fg(Color::Yellow)));
+                    }
+                    line_spans.push(Span::styled(
+                        ch.to_string(),
+                        Style::default().fg(Color::White),
+                    ));
+                    char_idx += 1;
+                }
+
+                visual_lines.push(Line::from(line_spans));
+            }
+
+            // Account for the newline character (except for the last line)
+            if logical_line_idx < logical_lines.len() - 1 {
+                // If cursor is at this newline position
+                if is_focused && char_idx == cursor_pos {
+                    // Add cursor at end of previous line
+                    if let Some(last_line) = visual_lines.last_mut() {
+                        let mut spans: Vec<Span> = last_line.spans.to_vec();
+                        spans.push(Span::styled("│", Style::default().fg(Color::Yellow)));
+                        *last_line = Line::from(spans);
+                    }
+                }
+                char_idx += 1; // For the '\n'
+            }
+        }
+
+        // If cursor is at the very end, add it to the last line
+        if is_focused && cursor_pos >= text.chars().count() {
+            if let Some(last_line) = visual_lines.last_mut() {
+                let mut spans: Vec<Span> = last_line.spans.to_vec();
+                spans.push(Span::styled("│", Style::default().fg(Color::Yellow)));
+                *last_line = Line::from(spans);
+            } else {
+                visual_lines.push(Line::from(Span::styled(
+                    "│",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
+
+        if visual_lines.is_empty() {
+            visual_lines.push(Line::from(Span::styled(
+                "│",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+
+        Text::from(visual_lines)
+    };
+
+    // Calculate visual cursor row for scrolling
+    let visual_cursor_row: usize = if text.is_empty() || wrap_width == 0 {
+        0
+    } else {
+        let logical_lines: Vec<&str> = text.split('\n').collect();
+        let mut row = 0;
+        let mut char_idx = 0;
+
+        'outer: for (line_idx, logical_line) in logical_lines.iter().enumerate() {
+            let wrapped_parts = wrap_line_manual(logical_line, wrap_width);
+
+            for wrapped_part in &wrapped_parts {
+                let part_char_count = wrapped_part.chars().count();
+
+                if char_idx + part_char_count >= cursor_pos && char_idx <= cursor_pos {
+                    // Cursor is on this wrapped line
+                    break 'outer;
+                }
+
+                char_idx += part_char_count;
+                row += 1;
+            }
+
+            // Account for newline
+            if line_idx < logical_lines.len() - 1 {
+                if char_idx == cursor_pos {
+                    break 'outer;
+                }
+                char_idx += 1;
+            }
+        }
+        row
+    };
+
+    // Update scroll offset to keep cursor visible
+    let visible_height = text_inner.height as usize;
+    let mut scroll_offset = app.search_state.manual_entry_scroll_offset.get();
+
+    if visible_height > 0 {
+        if visual_cursor_row < scroll_offset {
+            scroll_offset = visual_cursor_row;
+        } else if visual_cursor_row >= scroll_offset + visible_height {
+            scroll_offset = visual_cursor_row - visible_height + 1;
+        }
+        app.search_state
+            .manual_entry_scroll_offset
+            .set(scroll_offset);
+    }
+
+    let text_paragraph = Paragraph::new(text_content).scroll((scroll_offset as u16, 0));
+    frame.render_widget(text_paragraph, text_inner);
+
+    // Render help text
+    let help_line = Line::from(vec![
+        Span::styled(
+            "Tab",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": switch | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": submit | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "Shift+Enter",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": newline | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "F4",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": copy | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "F5",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": paste | ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": cancel", Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let help_paragraph = Paragraph::new(help_line).alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(help_paragraph, chunks[2]);
 }
 
 /// Get color for a state key based on its component prefix
@@ -1347,10 +1695,6 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
         Text::from(all_lines)
     };
 
-    // Render pre-wrapped text without additional wrapping
-    let paragraph = Paragraph::new(wrapped_display);
-    frame.render_widget(paragraph, inner);
-
     // Calculate visual cursor position using the same wrapping logic
     let mut visual_row: u16 = 0;
     let mut visual_col: u16 = 0;
@@ -1383,14 +1727,37 @@ fn render_input_area(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    // Position cursor (clamped to visible area)
-    let visible_height = inner.height;
-    if visual_row < visible_height {
+    // Update scroll offset to keep cursor visible (uses Cell for interior mutability)
+    let visible_height = inner.height as usize;
+    let mut scroll_offset = app.input_scroll_offset.get();
+
+    if visible_height > 0 {
+        let cursor_row_usize = visual_row as usize;
+
+        // If cursor is above visible area, scroll up
+        if cursor_row_usize < scroll_offset {
+            scroll_offset = cursor_row_usize;
+        }
+        // If cursor is below visible area, scroll down
+        else if cursor_row_usize >= scroll_offset + visible_height {
+            scroll_offset = cursor_row_usize - visible_height + 1;
+        }
+
+        app.input_scroll_offset.set(scroll_offset);
+    }
+
+    // Render pre-wrapped text with scroll offset applied
+    let paragraph = Paragraph::new(wrapped_display).scroll((scroll_offset as u16, 0));
+    frame.render_widget(paragraph, inner);
+
+    // Position cursor relative to scroll offset
+    let adjusted_row = visual_row.saturating_sub(scroll_offset as u16);
+    if (adjusted_row as usize) < visible_height {
         let cursor_x = inner
             .x
             .saturating_add(visual_col)
             .min(inner.x + inner.width - 1);
-        let cursor_y = inner.y.saturating_add(visual_row);
+        let cursor_y = inner.y.saturating_add(adjusted_row);
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 }

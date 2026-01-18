@@ -19,6 +19,7 @@ import argparse
 import logging
 import math
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -528,6 +529,160 @@ def call():
         )
 
 
+@app.route("/add", methods=["POST"])
+def add():
+    """Add a document to ChromaDB.
+
+    This endpoint adds a single document to the ChromaDB collection,
+    generating an embedding for semantic search. Used for manual
+    user-provided context entries.
+    """
+    # Ensure ChromaDB client is connected
+    client = _ensure_chromadb_client()
+    if client is None:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": {
+                        "type": "ServiceUnavailable",
+                        "message": f"ChromaDB at {chromadb_host}:{chromadb_port} is unavailable",
+                    },
+                }
+            ),
+            503,
+        )
+
+    try:
+        data = request.get_json()
+    except UnsupportedMediaType:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": {
+                        "type": "ValidationError",
+                        "message": "Request Content-Type must be application/json",
+                    },
+                }
+            ),
+            400,
+        )
+
+    try:
+        if not data:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "ValidationError",
+                            "message": "Request body must be JSON",
+                        },
+                    }
+                ),
+                400,
+            )
+
+        # Extract and validate parameters
+        text = data.get("text")
+        if not text or not isinstance(text, str):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "ValidationError",
+                            "message": "Missing or invalid required parameter: text",
+                        },
+                    }
+                ),
+                400,
+            )
+
+        # Source defaults to "User Context"
+        source = data.get("source", "User Context")
+        if not isinstance(source, str):
+            source = "User Context"
+
+        # ID is optional, generate a UUID if not provided
+        doc_id = data.get("id")
+        if not doc_id or not isinstance(doc_id, str):
+            doc_id = f"user-context-{uuid.uuid4()}"
+
+        collection_name = data.get("collection", DEFAULT_COLLECTION)
+        if not isinstance(collection_name, str):
+            collection_name = DEFAULT_COLLECTION
+
+        # Get or create collection
+        try:
+            collection = client.get_or_create_collection(name=collection_name)
+        except Exception as e:
+            logger.warning(f"ChromaDB error getting/creating collection: {e}")
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "ServiceUnavailable",
+                            "message": f"ChromaDB error: {e}",
+                        },
+                    }
+                ),
+                503,
+            )
+
+        # Generate embedding for the document
+        embedding = get_embedding(text)
+        if embedding is None:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": {
+                            "type": "ServiceUnavailable",
+                            "message": "Failed to get embedding from embeddings tool",
+                        },
+                    }
+                ),
+                503,
+            )
+
+        # Add to ChromaDB
+        collection.add(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[{"source": source}],
+        )
+
+        logger.info(f"Added document to ChromaDB: id={doc_id}, source={source}")
+
+        return jsonify(
+            {
+                "success": True,
+                "result": {
+                    "id": doc_id,
+                    "source": source,
+                    "text_length": len(text),
+                    "collection": collection_name,
+                },
+            }
+        )
+
+    except Exception as e:
+        logger.exception(f"Error adding document: {e}")
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": {"type": "InternalError", "message": str(e)},
+                }
+            ),
+            500,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="AI Tool Server: ChromaDB Search",
@@ -545,6 +700,7 @@ def main():
     print("  GET  /health   - Health check")
     print("  GET  /describe - Tool metadata")
     print("  POST /call     - Execute search")
+    print("  POST /add      - Add document to ChromaDB")
 
     # Run with waitress for production-ready WSGI server
     try:

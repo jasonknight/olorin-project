@@ -33,6 +33,7 @@ anyhow = "1"
 dirs = "6"
 textwrap = "0.16"
 unicode-width = "0.2"
+arboard = "3"
 
 # Token counting
 tiktoken-rs = "0.6"

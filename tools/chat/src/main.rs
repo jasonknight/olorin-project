@@ -137,14 +137,17 @@ async fn run_event_loop(
                         // Only show quit modal if not in a text input context
                         let in_text_input = app.active_tab == ActiveTab::Chat
                             || (app.active_tab == ActiveTab::Search
-                                && app.search_state.focus == crate::app::SearchFocus::Input
-                                && !app.search_state.showing_modal);
+                                && (app.search_state.showing_manual_entry
+                                    || (app.search_state.focus == crate::app::SearchFocus::Input
+                                        && !app.search_state.showing_modal)));
                         if in_text_input {
                             // Pass through to text input
                             if app.active_tab == ActiveTab::Chat {
                                 let input = Input::from(key);
                                 app.input.input(input);
                                 app.update_completion();
+                            } else if app.search_state.showing_manual_entry {
+                                app.manual_entry_input_char('q');
                             } else {
                                 app.search_input_char('q');
                             }
@@ -161,7 +164,9 @@ async fn run_event_loop(
                                 app.show_quit_modal();
                             }
                             ActiveTab::Search => {
-                                if app.search_state.showing_help {
+                                if app.search_state.showing_manual_entry {
+                                    app.close_manual_entry_modal();
+                                } else if app.search_state.showing_help {
                                     app.close_search_help();
                                 } else if app.search_state.showing_modal {
                                     app.close_search_modal();
@@ -272,6 +277,61 @@ async fn run_event_loop(
                                 continue;
                             }
 
+                            // Handle manual entry modal
+                            if app.search_state.showing_manual_entry {
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Esc, _) => {
+                                        app.close_manual_entry_modal();
+                                    }
+                                    (KeyCode::Tab, KeyModifiers::NONE) => {
+                                        app.toggle_manual_entry_focus();
+                                    }
+                                    (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                                        app.manual_entry_input_newline();
+                                    }
+                                    (KeyCode::Enter, KeyModifiers::NONE) => {
+                                        app.submit_manual_entry().await;
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        app.manual_entry_input_backspace();
+                                    }
+                                    (KeyCode::Delete, _) => {
+                                        app.manual_entry_input_delete();
+                                    }
+                                    (KeyCode::Left, _) => {
+                                        app.manual_entry_cursor_left();
+                                    }
+                                    (KeyCode::Right, _) => {
+                                        app.manual_entry_cursor_right();
+                                    }
+                                    (KeyCode::Up, _) => {
+                                        app.manual_entry_cursor_up();
+                                    }
+                                    (KeyCode::Down, _) => {
+                                        app.manual_entry_cursor_down();
+                                    }
+                                    (KeyCode::Home, _) => {
+                                        app.manual_entry_cursor_home();
+                                    }
+                                    (KeyCode::End, _) => {
+                                        app.manual_entry_cursor_end();
+                                    }
+                                    // F4 to copy text content to clipboard
+                                    (KeyCode::F(4), _) => {
+                                        app.manual_entry_copy_to_clipboard();
+                                    }
+                                    // F5 to paste from clipboard
+                                    (KeyCode::F(5), _) => {
+                                        app.manual_entry_paste_from_clipboard();
+                                    }
+                                    (KeyCode::Char(c), _) => {
+                                        app.manual_entry_input_char(c);
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+
                             // Handle ? to show help (works in any context except help modal)
                             if key.code == KeyCode::Char('?') {
                                 app.toggle_search_help();
@@ -281,6 +341,12 @@ async fn run_event_loop(
                             // Handle F2 to toggle search mode
                             if key.code == KeyCode::F(2) {
                                 app.toggle_search_mode();
+                                continue;
+                            }
+
+                            // Handle F3 to show manual entry modal
+                            if key.code == KeyCode::F(3) {
+                                app.show_manual_entry_modal();
                                 continue;
                             }
 
