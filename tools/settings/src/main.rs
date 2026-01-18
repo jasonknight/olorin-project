@@ -33,10 +33,27 @@ use input_handler::{handle_key_event, KeyAction};
 use olorin_config::Config;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io;
+use std::io::{self, Write};
+use std::panic;
 use std::time::Duration;
 
+/// Restore terminal to normal state. Safe to call multiple times.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = io::stdout().execute(LeaveAlternateScreen);
+    // Ensure cursor is visible
+    let _ = io::stdout().write_all(b"\x1B[?25h");
+    let _ = io::stdout().flush();
+}
+
 fn main() -> Result<()> {
+    // Set up panic hook to restore terminal on panic
+    let original_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        restore_terminal();
+        original_hook(panic_info);
+    }));
+
     // Get config path
     let config = Config::new(None, false)?;
     let config_path = config.config_path().clone();
@@ -57,9 +74,8 @@ fn main() -> Result<()> {
     // Run event loop
     let result = run_event_loop(&mut terminal, &mut app);
 
-    // Restore terminal
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    // Restore terminal (also handles normal exit)
+    restore_terminal();
     terminal.show_cursor()?;
 
     result

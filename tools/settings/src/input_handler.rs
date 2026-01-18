@@ -21,7 +21,7 @@ pub enum KeyAction {
 /// Handle a key event and return the action to take
 pub fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> KeyAction {
     // Global keys that work regardless of focus
-    if let Some(action) = handle_global_keys(app, code) {
+    if let Some(action) = handle_global_keys(app, code, modifiers) {
         return action;
     }
 
@@ -55,12 +55,16 @@ pub fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -
 }
 
 /// Handle global keys that work regardless of focus
-fn handle_global_keys(app: &mut App, code: KeyCode) -> Option<KeyAction> {
+fn handle_global_keys(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Option<KeyAction> {
+    // Ctrl+C or Esc to quit
+    if code == KeyCode::Esc
+        || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+    {
+        app.should_quit = true;
+        return Some(KeyAction::Quit);
+    }
+
     match code {
-        KeyCode::Esc => {
-            app.should_quit = true;
-            Some(KeyAction::Quit)
-        }
         KeyCode::F(5) => {
             app.refresh_dynamic_options();
             Some(KeyAction::Redraw)
