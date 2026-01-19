@@ -794,20 +794,10 @@ class ExoConsumer:
             if context_warning:
                 logger.warning(f"[{thread_name}] {context_warning}")
 
-            # Build API params
-            api_params = {
-                "model": model_to_use,
-                "messages": messages,
-                "temperature": self.config.temperature,
-                "stream": True,
-            }
-
-            if self.config.max_tokens:
-                api_params["max_tokens"] = self.config.max_tokens
-
             # Check if we should include tools
             # Re-verify tool support if model changed since last check
             use_tools = False
+            tools_to_use = None
             skip_tools = self.context_formatter.should_skip_tools_for_rag(
                 context_chunks
             )
@@ -832,13 +822,17 @@ class ExoConsumer:
                     use_tools = True
 
             if use_tools:
-                api_params["tools"] = self.available_tools
+                tools_to_use = self.available_tools
 
-            # Make streaming API call
+            # Make streaming API call via abstracted inference client
             api_start_time = datetime.now()
             try:
-                stream = self.inference.backend.client.chat.completions.create(
-                    **api_params
+                stream = self.inference.complete_stream(
+                    messages=messages,
+                    model=model_to_use,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    tools=tools_to_use,
                 )
             except Exception as e:
                 # Check if error is due to tool support
@@ -850,14 +844,17 @@ class ExoConsumer:
                     # Mark tools as unsupported and retry
                     self._tools_supported = False
                     self.available_tools = []
-                    api_params.pop("tools", None)
-                    stream = self.inference.backend.client.chat.completions.create(
-                        **api_params
+                    stream = self.inference.complete_stream(
+                        messages=messages,
+                        model=model_to_use,
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.max_tokens,
+                        tools=None,
                     )
                 else:
                     raise
 
-            # Process stream
+            # Process stream (using CompletionChunk format from inference library)
             first_chunk_time = None
             finish_reason = None
             streaming_message_id = None
@@ -866,91 +863,77 @@ class ExoConsumer:
             was_in_thinking = False
 
             for chunk in stream:
-                if chunk.choices and len(chunk.choices) > 0:
-                    choice = chunk.choices[0]
-                    delta = choice.delta
+                # CompletionChunk has: content, finish_reason, tool_calls
+                if chunk.finish_reason:
+                    finish_reason = chunk.finish_reason
 
-                    if choice.finish_reason:
-                        finish_reason = choice.finish_reason
+                # Tool calls are accumulated by backend, returned in final chunk
+                if chunk.tool_calls:
+                    tool_accumulator.tool_calls = chunk.tool_calls
 
-                    # Accumulate tool calls
-                    if hasattr(delta, "tool_calls") and delta.tool_calls:
-                        tool_accumulator.process_delta(delta.tool_calls)
+                if chunk.content:
+                    content = chunk.content
 
-                    if hasattr(delta, "content") and delta.content:
-                        content = delta.content
+                    if first_chunk_time is None:
+                        first_chunk_time = datetime.now()
+                        ttfc = (first_chunk_time - api_start_time).total_seconds()
+                        logger.info(
+                            f"[{thread_name}] First chunk in {ttfc:.2f}s, cancelling processing notices"
+                        )
+                        processing_cancel_event.set()
 
-                        if first_chunk_time is None:
-                            first_chunk_time = datetime.now()
-                            ttfc = (first_chunk_time - api_start_time).total_seconds()
-                            logger.info(
-                                f"[{thread_name}] First chunk in {ttfc:.2f}s, cancelling processing notices"
-                            )
-                            processing_cancel_event.set()
+                    # Check for thinking block entry
+                    was_in_thinking = stream_processor.in_thinking
 
-                        # Check for thinking block entry
-                        was_in_thinking = stream_processor.in_thinking
+                    # Process content
+                    tts_chunks = stream_processor.process_content(content)
 
-                        # Process content
-                        tts_chunks = stream_processor.process_content(content)
+                    # Send thinking notice if just entered thinking
+                    if stream_processor.in_thinking and not was_in_thinking:
+                        msg = self.msg_factory.thinking_notice(message_id, model_to_use)
+                        self.producer.send(self.config.kafka_output_topic, value=msg)
 
-                        # Send thinking notice if just entered thinking
-                        if stream_processor.in_thinking and not was_in_thinking:
-                            msg = self.msg_factory.thinking_notice(
-                                message_id, model_to_use
-                            )
-                            self.producer.send(
-                                self.config.kafka_output_topic, value=msg
-                            )
-
-                        # Create streaming message in DB
-                        if (
-                            streaming_message_id is None
-                            and self.chat_store
-                            and stream_processor.display_text.strip()
-                            and not stream_processor.in_thinking
-                        ):
-                            conv_id = self.chat_store.get_active_conversation_id()
-                            if conv_id:
-                                streaming_message_id = (
-                                    self.chat_store.add_assistant_message(
-                                        conv_id, stream_processor.display_text
-                                    )
+                    # Create streaming message in DB
+                    if (
+                        streaming_message_id is None
+                        and self.chat_store
+                        and stream_processor.display_text.strip()
+                        and not stream_processor.in_thinking
+                    ):
+                        conv_id = self.chat_store.get_active_conversation_id()
+                        if conv_id:
+                            streaming_message_id = (
+                                self.chat_store.add_assistant_message(
+                                    conv_id, stream_processor.display_text
                                 )
+                            )
 
-                        # Periodically update DB
-                        if (
-                            streaming_message_id
-                            and (
-                                stream_processor.state.chunk_count
-                                - last_db_update_chunk
+                    # Periodically update DB
+                    if (
+                        streaming_message_id
+                        and (stream_processor.state.chunk_count - last_db_update_chunk)
+                        >= DB_UPDATE_INTERVAL
+                    ):
+                        try:
+                            self.chat_store.update_message(
+                                streaming_message_id, stream_processor.display_text
                             )
-                            >= DB_UPDATE_INTERVAL
-                        ):
-                            try:
-                                self.chat_store.update_message(
-                                    streaming_message_id, stream_processor.display_text
-                                )
-                                last_db_update_chunk = (
-                                    stream_processor.state.chunk_count
-                                )
-                            except Exception:
-                                pass
+                            last_db_update_chunk = stream_processor.state.chunk_count
+                        except Exception:
+                            pass
 
-                        # Send TTS chunks
-                        for tts_chunk in tts_chunks:
-                            msg = self.msg_factory.tts_chunk(
-                                text=tts_chunk.text,
-                                message_id=f"{message_id}_chunk_{tts_chunk.chunk_number}",
-                                prompt_id=message_id,
-                                chunk_number=tts_chunk.chunk_number,
-                                model=model_to_use,
-                                word_threshold=tts_chunk.word_threshold,
-                                is_final=tts_chunk.is_final,
-                            )
-                            self.producer.send(
-                                self.config.kafka_output_topic, value=msg
-                            )
+                    # Send TTS chunks
+                    for tts_chunk in tts_chunks:
+                        msg = self.msg_factory.tts_chunk(
+                            text=tts_chunk.text,
+                            message_id=f"{message_id}_chunk_{tts_chunk.chunk_number}",
+                            prompt_id=message_id,
+                            chunk_number=tts_chunk.chunk_number,
+                            model=model_to_use,
+                            word_threshold=tts_chunk.word_threshold,
+                            is_final=tts_chunk.is_final,
+                        )
+                        self.producer.send(self.config.kafka_output_topic, value=msg)
 
             # Flush remaining content
             final_chunk = stream_processor.flush()
