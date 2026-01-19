@@ -1361,8 +1361,22 @@ class AnthropicBackend(InferenceBackend):
     - System prompt as separate parameter
     - Tool/function calling with Anthropic format
     - Streaming via message stream context manager
+    - RLM (Recursive Language Model) for handling very large contexts
 
     API Reference: https://docs.anthropic.com/en/api/messages
+
+    RLM Mode:
+        When enabled (default), the backend can handle contexts that exceed
+        the model's context window by using recursive decomposition. The LLM
+        writes code to partition and analyze large contexts, with sub-LM calls
+        for each chunk. This is based on arxiv:2512.24601v1.
+
+        RLM is triggered when:
+        - RLM is enabled in config (anthropic.rlm.enabled = true)
+        - Context size exceeds the threshold (default: 50% of context window)
+
+        To disable RLM and use standard context handling:
+        - Set anthropic.rlm.enabled = false in settings.json
     """
 
     # Known context windows for Claude models (in tokens)
@@ -1383,6 +1397,7 @@ class AnthropicBackend(InferenceBackend):
         default_model: str = "claude-sonnet-4-20250514",
         default_temperature: float = 0.7,
         default_max_tokens: int = 4096,
+        rlm_config: Optional[dict] = None,
     ):
         """
         Initialize the Anthropic backend.
@@ -1392,6 +1407,10 @@ class AnthropicBackend(InferenceBackend):
             default_model: Default Claude model to use
             default_temperature: Default temperature for completions
             default_max_tokens: Default max tokens for completions
+            rlm_config: Optional RLM configuration dict. If None, RLM is enabled
+                        with defaults. Keys: enabled, context_threshold,
+                        max_recursion_depth, max_iterations, max_total_tokens,
+                        sub_call_timeout, total_timeout, temperature
         """
         import anthropic
 
@@ -1407,7 +1426,170 @@ class AnthropicBackend(InferenceBackend):
         self._tools_supported: Optional[bool] = None
         self._tools_model: Optional[str] = None
 
-        logger.info(f"AnthropicBackend initialized with model={self._default_model}")
+        # Initialize RLM executor
+        self._rlm_executor: Optional[Any] = None
+        self._rlm_enabled = True  # Default enabled
+        self._init_rlm(rlm_config)
+
+        logger.info(
+            f"AnthropicBackend initialized with model={self._default_model}, "
+            f"rlm_enabled={self._rlm_enabled}"
+        )
+
+    def _init_rlm(self, rlm_config: Optional[dict]) -> None:
+        """Initialize the RLM executor with configuration."""
+        from libs.rlm_executor import RLMConfig, RLMExecutor
+
+        # Build RLM config from dict or use defaults
+        if rlm_config is None:
+            rlm_config = {}
+
+        self._rlm_enabled = rlm_config.get("enabled", True)
+
+        if not self._rlm_enabled:
+            logger.info("RLM mode disabled via configuration")
+            return
+
+        config = RLMConfig(
+            enabled=self._rlm_enabled,
+            context_threshold=rlm_config.get("context_threshold", 0.5),
+            max_recursion_depth=rlm_config.get("max_recursion_depth", 3),
+            max_iterations=rlm_config.get("max_iterations", 10),
+            max_total_tokens=rlm_config.get("max_total_tokens", 100000),
+            sub_call_timeout=rlm_config.get("sub_call_timeout", 60.0),
+            total_timeout=rlm_config.get("total_timeout", 300.0),
+            temperature=rlm_config.get("temperature", 0.3),
+        )
+
+        self._rlm_executor = RLMExecutor(self, config)
+        logger.info(
+            f"RLM executor initialized with threshold={config.context_threshold}, "
+            f"max_iterations={config.max_iterations}"
+        )
+
+    def _should_use_rlm(self, messages: list[dict]) -> bool:
+        """
+        Determine if RLM should be used for this request.
+
+        RLM is used when:
+        - RLM is enabled in configuration
+        - Context size exceeds the threshold percentage of the context window
+
+        Args:
+            messages: The messages to check
+
+        Returns:
+            True if RLM should be used
+        """
+        if not self._rlm_enabled or self._rlm_executor is None:
+            return False
+
+        # Calculate total context size
+        total_chars = sum(len(msg.get("content", "") or "") for msg in messages)
+
+        # Get context window for current model
+        capabilities = self.get_model_capabilities()
+        if capabilities is None:
+            return False
+
+        context_window = capabilities.context_length
+
+        # Check if RLM should be used
+        return self._rlm_executor.should_use_rlm(total_chars, context_window)
+
+    def _extract_context_and_question(self, messages: list[dict]) -> tuple[str, str]:
+        """
+        Extract context and question from messages for RLM processing.
+
+        Looks for context in <context> tags and extracts the user's question.
+
+        Args:
+            messages: The conversation messages
+
+        Returns:
+            Tuple of (context, question)
+        """
+        import re
+
+        context = ""
+        question = ""
+
+        for msg in messages:
+            content = msg.get("content", "") or ""
+            role = msg.get("role", "")
+
+            if role == "user":
+                # Look for context tags
+                context_match = re.search(
+                    r"<context>(.*?)</context>", content, re.DOTALL
+                )
+                if context_match:
+                    context = context_match.group(1).strip()
+                    # Extract question after context
+                    after_context = content[context_match.end() :].strip()
+                    if after_context:
+                        # Look for "Question:" prefix
+                        q_match = re.search(
+                            r"(?:Question:|Q:)\s*(.*)",
+                            after_context,
+                            re.DOTALL | re.IGNORECASE,
+                        )
+                        if q_match:
+                            question = q_match.group(1).strip()
+                        else:
+                            question = after_context
+                elif not context:
+                    # No context tags - treat entire content as question
+                    question = content
+
+            elif role == "system":
+                # System prompt could contain context
+                if "<context>" in content:
+                    context_match = re.search(
+                        r"<context>(.*?)</context>", content, re.DOTALL
+                    )
+                    if context_match:
+                        context = context_match.group(1).strip()
+
+        return context, question
+
+    def complete_with_rlm(
+        self,
+        context: str,
+        question: str,
+        model: Optional[str] = None,
+    ) -> CompletionResponse:
+        """
+        Execute RLM to answer a question using a large context.
+
+        Args:
+            context: The full context document
+            question: The user's question
+            model: Override model (None = use default)
+
+        Returns:
+            CompletionResponse with the answer
+        """
+        if self._rlm_executor is None:
+            raise RuntimeError("RLM executor not initialized")
+
+        thread_name = threading.current_thread().name
+        logger.info(f"[{thread_name}] Using RLM mode for {len(context):,} char context")
+
+        # Execute RLM
+        answer = self._rlm_executor.execute(context, question)
+
+        return CompletionResponse(
+            content=answer,
+            finish_reason="stop",
+            tool_calls=None,
+            usage=None,  # RLM doesn't track aggregate usage yet
+        )
+
+    @property
+    def rlm_enabled(self) -> bool:
+        """Return whether RLM mode is enabled."""
+        return self._rlm_enabled
 
     @property
     def backend_type(self) -> BackendType:
@@ -1623,10 +1805,26 @@ class AnthropicBackend(InferenceBackend):
         tools: Optional[list[dict]] = None,
         timeout: Optional[float] = None,
     ) -> CompletionResponse:
-        """Non-streaming completion via Anthropic API."""
+        """
+        Non-streaming completion via Anthropic API.
+
+        If RLM is enabled and the context size exceeds the threshold,
+        this will automatically use RLM mode to decompose and analyze
+        the context recursively.
+        """
         model_to_use = model or self._default_model
         if not model_to_use:
             raise ValueError("No model available for inference")
+
+        # Check if RLM should be used (only for non-tool calls)
+        if not tools and self._should_use_rlm(messages):
+            context, question = self._extract_context_and_question(messages)
+            if context and question:
+                logger.info(
+                    f"Routing to RLM: {len(context):,} char context, "
+                    f"question: {question[:100]}..."
+                )
+                return self.complete_with_rlm(context, question, model)
 
         # Convert messages
         system_prompt, converted_messages = self._convert_messages_for_anthropic(
@@ -1890,6 +2088,29 @@ class InferenceClient:
                     "ANTHROPIC_API_KEY not found. Please add it to your .env file: "
                     "ANTHROPIC_API_KEY=sk-ant-..."
                 )
+            # Build RLM configuration
+            rlm_config = {
+                "enabled": self._config.get_bool("ANTHROPIC_RLM_ENABLED", True),
+                "context_threshold": self._config.get_float(
+                    "ANTHROPIC_RLM_CONTEXT_THRESHOLD", 0.5
+                ),
+                "max_recursion_depth": self._config.get_int(
+                    "ANTHROPIC_RLM_MAX_RECURSION_DEPTH", 3
+                ),
+                "max_iterations": self._config.get_int(
+                    "ANTHROPIC_RLM_MAX_ITERATIONS", 10
+                ),
+                "max_total_tokens": self._config.get_int(
+                    "ANTHROPIC_RLM_MAX_TOTAL_TOKENS", 100000
+                ),
+                "sub_call_timeout": self._config.get_float(
+                    "ANTHROPIC_RLM_SUB_CALL_TIMEOUT", 60.0
+                ),
+                "total_timeout": self._config.get_float(
+                    "ANTHROPIC_RLM_TOTAL_TIMEOUT", 300.0
+                ),
+                "temperature": self._config.get_float("ANTHROPIC_RLM_TEMPERATURE", 0.3),
+            }
             self._backend = AnthropicBackend(
                 api_key=api_key,
                 default_model=self._config.get(
@@ -1899,6 +2120,7 @@ class InferenceClient:
                 or 0.7,
                 default_max_tokens=self._config.get_int("ANTHROPIC_MAX_TOKENS", 4096)
                 or 4096,
+                rlm_config=rlm_config,
             )
         else:
             raise ValueError(f"Unknown inference backend: {backend_type}")

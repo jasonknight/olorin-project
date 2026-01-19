@@ -124,6 +124,15 @@ _KEY_TO_PATH = {
     "ANTHROPIC_MODEL_NAME": "anthropic.model_name",
     "ANTHROPIC_TEMPERATURE": "anthropic.temperature",
     "ANTHROPIC_MAX_TOKENS": "anthropic.max_tokens",
+    # Anthropic RLM (Recursive Language Model)
+    "ANTHROPIC_RLM_ENABLED": "anthropic.rlm.enabled",
+    "ANTHROPIC_RLM_CONTEXT_THRESHOLD": "anthropic.rlm.context_threshold",
+    "ANTHROPIC_RLM_MAX_RECURSION_DEPTH": "anthropic.rlm.max_recursion_depth",
+    "ANTHROPIC_RLM_MAX_ITERATIONS": "anthropic.rlm.max_iterations",
+    "ANTHROPIC_RLM_MAX_TOTAL_TOKENS": "anthropic.rlm.max_total_tokens",
+    "ANTHROPIC_RLM_SUB_CALL_TIMEOUT": "anthropic.rlm.sub_call_timeout",
+    "ANTHROPIC_RLM_TOTAL_TIMEOUT": "anthropic.rlm.total_timeout",
+    "ANTHROPIC_RLM_TEMPERATURE": "anthropic.rlm.temperature",
     # Temporal (voice-activated STT)
     "TEMPORAL_OUTPUT_TOPIC": "temporal.output_topic",
     "TEMPORAL_FEEDBACK_TOPIC": "temporal.feedback_topic",
