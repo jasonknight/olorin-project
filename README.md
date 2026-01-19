@@ -1,223 +1,220 @@
-# Olorin Project
+# Olorin
 
-Distributed AI pipeline: Kafka-connected microservices for AI inference (Cortex), text-to-speech (Broca), document retrieval (Hippocampus), and context enrichment (Enrichener).
+**Your AI-powered Second Brain with a Voice**
 
-## Quick Reference
+Olorin is a personal AI assistant designed to be your Chief of Staff—always listening, always ready to help, with instant access to your documents and knowledge. Talk to it naturally, and it talks back.
 
-| Component | Purpose | Input | Output | Port |
-|-----------|---------|-------|--------|------|
-| Cortex | AI inference via Exo | `prompts` topic | `ai_out` topic | - |
-| Broca | TTS via Coqui | `ai_out` topic | Audio playback | - |
-| Hippocampus | Document ingestion | `~/Documents/AI_IN` | ChromaDB | - |
-| Enrichener | Context retrieval | `ai_in` topic | `prompts` topic | - |
-| Control API | Slash commands | HTTP | - | 8765 |
-| Kafka | Message broker | - | - | 9092 |
-| ChromaDB | Vector database | - | - | 8000 |
-| Exo | LLM inference | - | - | 52415 |
+## What Olorin Does
 
-### Tools (AI Function Calling)
+- **Voice In, Voice Out** — Say "Hey Olorin" and speak naturally. Get spoken responses back.
+- **Knows Your Documents** — Drop files into a folder. Olorin reads, indexes, and recalls them when relevant.
+- **Multiple AI Backends** — Use Claude, Ollama (local), or distributed inference. Your choice.
+- **Takes Action** — The AI can write files, search your knowledge base, and execute tasks autonomously.
+- **Remembers Everything** — Full conversation history with context tracking across sessions.
 
-| Tool | Purpose | Port |
-|------|---------|------|
-| write | Write files to ~/Documents/AI_OUT | 8770 |
-| embeddings | Text embeddings (nomic-embed-text-v1.5) | 8771 |
-| chat | TUI chat client | - |
-| olorin-inspector | TUI database inspector | - |
+## Quick Start
+
+```bash
+# Check dependencies
+python3 setup.py
+
+# Start all services
+./up
+
+# Launch the chat interface
+cd tools/chat && cargo run --release
+
+# Or just talk — say "Hey Olorin"
+```
+
+## The Experience
+
+```
+You: "Hey Olorin"
+Olorin: "Yes?"
+
+You: "What were the key points from that product roadmap I saved last week?"
+Olorin: [retrieves document, synthesizes answer, speaks response]
+
+You: "Write up a summary and save it for me"
+Olorin: [creates markdown file in ~/Documents/AI_OUT]
+```
+
+### Voice Interface
+
+The voice pipeline listens continuously for the wake phrase. After activation:
+- Speak naturally until you pause (~3 seconds) or say "that's all"
+- Olorin retrieves relevant context from your knowledge base automatically
+- Response plays back through your speakers
+- Listening pauses during playback to prevent echo
+
+### Chat Interface
+
+A terminal-based interface (`tools/chat`) provides:
+- Full conversation view with streaming responses
+- Document search with add-to-context capability
+- System state monitoring (audio status, model info)
+- Slash commands for control
+
+### Document Ingestion
+
+Drop files into `~/Documents/AI_IN`. Olorin handles:
+- **Markdown** — Native support
+- **PDF** — Extracts text, converts to searchable chunks
+- **Ebooks** — EPUB, MOBI
+- **Office** — Word docs, ODT, plain text
+
+Documents are chunked semantically and stored in a vector database for instant retrieval.
+
+## Slash Commands
+
+| Command | What it does |
+|---------|--------------|
+| `/stop` | Mute audio playback |
+| `/resume` | Resume audio |
+| `/clear` | Wipe conversation history |
+| `/write [filename]` | Save last response to file |
+| `/auto-context on\|off` | Toggle automatic document retrieval |
+
+## Configuration
+
+All settings live in `settings.json`. Key options:
+
+| Setting | Purpose |
+|---------|---------|
+| `inference.backend` | Choose: `ollama`, `anthropic`, or `exo` |
+| `ollama.model_name` | Local model (e.g., `deepseek-r1:70b`) |
+| `anthropic.model_name` | Claude model (e.g., `claude-sonnet-4-20250514`) |
+| `temporal.wake_word.phrase` | Wake phrase (default: "hey olorin") |
+| `broca.tts.speaker` | Voice selection |
+| `hippocampus.input_dir` | Document watch folder |
+
+For Anthropic, add your API key to `.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
 
 ## Architecture
 
+Olorin is built as independent components that communicate asynchronously:
+
 ```
-                              ┌─────────────────────────────────────┐
-                              │           AI Tool Servers           │
-                              │  write (8770) │ embeddings (8771)   │
-                              └───────────────┬─────────────────────┘
-                                              │ function calls
-                                              ▼
-User Input → [ai_in] → Enrichener → [prompts] → Cortex → Exo API → [ai_out] → Broca → Audio
-                           │                       │
-                           ▼                       ▼
-                       ChromaDB              Control API (8765)
-                           ▲                  /stop, /clear, etc.
-                           │
-              ~/Documents/AI_IN → Hippocampus
-                                 (pdf, ebook, office, txt trackers)
+Voice ──► Temporal (STT) ──► Enrichener (RAG) ──► Cortex (AI) ──► Broca (TTS) ──► Audio
+                                   │                  │
+                                   ▼                  ▼
+                              ChromaDB            AI Tools
+                                   ▲              (write, search)
+                                   │
+              ~/Documents/AI_IN ──► Hippocampus (ingestion)
 ```
+
+| Component | Role |
+|-----------|------|
+| **Temporal** | Listens for wake word, transcribes speech |
+| **Enrichener** | Decides if context is needed, retrieves relevant documents |
+| **Cortex** | Sends prompts to AI, handles tool calls, manages conversation |
+| **Broca** | Converts responses to speech, plays audio |
+| **Hippocampus** | Monitors folders, processes documents, maintains vector store |
+
+### AI Tools
+
+The AI can call tools during inference:
+
+| Tool | Capability |
+|------|------------|
+| **write** | Save content to `~/Documents/AI_OUT` |
+| **search** | Query the knowledge base |
+| **embeddings** | Generate text embeddings |
 
 ## Operations
 
 ```bash
-./up       # Start all (Kafka, ChromaDB, tools, consumers)
-./down     # Stop all
-./status   # Health check with log analysis
+./up          # Start everything
+./down        # Stop everything
+./status      # Health check with log analysis
 ```
 
-### Per-Component
+### Logs
 
 ```bash
-# Cortex (AI)
-cd cortex && source venv/bin/activate
-python3 consumer.py    # Run consumer
-python3 producer.py    # Send test prompts
-
-# Broca (TTS)
-cd broca && source venv/bin/activate
-python3 consumer.py    # Run consumer
-python3 producer.py    # Send test text
-
-# Hippocampus (Documents)
-cd hippocampus && source venv/bin/activate
-python3 ingest.py      # Run ingestion
-python3 query.py       # Search REPL
-pytest --cov           # Run tests
-
-# Enrichener (Context)
-cd hippocampus && source venv/bin/activate
-python3 enrichener.py  # Run enricher
+tail -f logs/cortex-consumer.log      # AI processing
+tail -f logs/broca-consumer.log       # Text-to-speech
+tail -f logs/enrichener.log           # Context retrieval
+tail -f logs/hippocampus-ingest.log   # Document ingestion
 ```
 
 ## File Structure
 
 ```
 olorin-project/
-├── up, down, status       # Orchestration scripts
-├── settings.json          # Unified configuration
+├── up, down, status       # Control scripts
+├── setup.py               # Dependency checker
+├── settings.json          # Configuration
+├── .env                   # API keys (not committed)
+│
+├── temporal/              # Voice input (STT)
+├── cortex/                # AI inference + tools
+├── broca/                 # Voice output (TTS)
+├── hippocampus/           # Document processing
+│   └── enrichener.py      # Context retrieval
+│
+├── tools/
+│   ├── chat/              # Terminal chat interface
+│   ├── write/             # File writing tool
+│   ├── search/            # Knowledge base search
+│   └── olorin-inspector/  # Database viewer
+│
 ├── libs/                  # Shared libraries
-│   ├── config.py          # Configuration (hot-reload)
-│   ├── state.py           # State management (SQLite)
+│   ├── config.py          # Configuration management
+│   ├── state.py           # Runtime state
 │   ├── chat_store.py      # Conversation history
-│   ├── context_store.py   # Retrieved context
-│   ├── embeddings.py      # Embeddings client
-│   ├── tool_client.py     # AI tool integration
-│   ├── control_server.py  # Slash command API
-│   └── control_handlers/  # Command handlers
-│       ├── stop_audio.py
-│       ├── resume_audio.py
-│       ├── audio_status.py
-│       ├── clear.py
-│       ├── write.py
-│       └── auto_context.py
-├── libs/config-rs/        # Rust config library
-├── libs/state-rs/         # Rust state library
-├── cortex/                # AI consumer
-│   ├── consumer.py        # Kafka→Exo→Kafka + tool use
-│   ├── producer.py        # Test REPL
-│   └── controller.py      # Control server runner
-├── broca/                 # TTS consumer
-│   ├── consumer.py        # Kafka→Coqui→Audio
-│   └── producer.py        # Test REPL
-├── hippocampus/           # Document system
-│   ├── ingest.py          # Markdown→ChromaDB
-│   ├── enrichener.py      # Context retrieval consumer
-│   ├── pdf_tracker.py     # PDF→Markdown
-│   ├── ebook_tracker.py   # EPUB/MOBI→Markdown
-│   ├── txt_tracker.py     # TXT→Markdown
-│   ├── office_tracker.py  # DOC/DOCX/ODT→Markdown
-│   ├── query.py           # Hybrid search REPL
-│   └── markdown_chunker.py
-├── tools/                 # AI tool servers
-│   ├── write/             # Rust: file writer
-│   ├── embeddings/        # Python: text embeddings
-│   ├── chat/              # Rust: TUI chat client
-│   └── olorin-inspector/  # Rust: database inspector
-├── data/                  # Runtime data
-│   └── state.db           # Centralized state
-├── .pids/                 # Runtime PID files
-└── logs/                  # Runtime logs
+│   └── context_store.py   # Retrieved documents
+│
+├── data/                  # Runtime databases
+└── logs/                  # Application logs
 ```
-
-## Configuration
-
-All components use `settings.json` with hot-reload support. Key settings:
-
-| Section | Variable | Default |
-|---------|----------|---------|
-| exo | model_name | auto-detect |
-| exo | temperature | 0.7 |
-| exo | base_url | http://localhost:52415/v1 |
-| broca.tts | model_name | tts_models/en/vctk/vits |
-| broca.tts | speaker | p272 |
-| hippocampus | input_dir | ~/Documents/AI_IN |
-| tools.embeddings | model | nomic-ai/nomic-embed-text-v1.5 |
-| control.api | port | 8765 |
-
-Set `global.log_level` to `DEBUG` for verbose output.
-
-## State Management
-
-Runtime state is stored in `data/state.db` (SQLite). Components share state via typed key-value storage:
-
-```python
-from libs.state import State
-state = State()
-state.set("broca.is_playing", True)
-playing = state.get_bool("broca.is_playing")
-```
-
-Common keys: `broca.audio_pid`, `broca.is_playing`, `cortex.tools_supported`
-
-## Slash Commands
-
-User-invoked commands via Control API (port 8765):
-
-| Command | Description |
-|---------|-------------|
-| /stop | Stop audio playback |
-| /resume | Resume audio playback |
-| /clear | Clear conversation history |
-| /write | Write content to file |
-| /auto-context | Toggle context retrieval |
-
-## AI Tool Use
-
-The AI model can call tools during inference. Tools are HTTP servers with `/health`, `/describe`, `/call` endpoints.
-
-**write**: Writes files to `~/Documents/AI_OUT`
-**embeddings**: Generates text embeddings (centralized, shared across components)
 
 ## Data Storage
 
-| Path | Purpose |
-|------|---------|
-| `data/state.db` | Centralized runtime state |
+| Location | Contents |
+|----------|----------|
+| `data/state.db` | Runtime state (audio status, model info) |
 | `cortex/data/chat.db` | Conversation history |
-| `hippocampus/data/tracking.db` | File tracking |
-| `hippocampus/data/context.db` | Retrieved context |
-| `hippocampus/data/pdf_tracking.db` | PDF processing state |
-| `hippocampus/data/ebook_tracking.db` | Ebook processing state |
-| `hippocampus/data/txt_tracking.db` | Text file processing |
-| `hippocampus/data/office_tracking.db` | Office document processing |
-| `broca/output/` | Generated audio files |
-| `.pids/` | Process ID files |
-| `logs/` | Application logs |
+| `hippocampus/data/*.db` | Document tracking |
+| `~/Documents/AI_IN` | Your input documents |
+| `~/Documents/AI_OUT` | AI-generated files |
 
-## Dependencies
+## Requirements
 
-**External services (must be running):**
-- Exo server on port 52415 (before Cortex)
-- Kafka container via Podman (started by `./up`)
-- ChromaDB container via Podman (started by `./up`)
+**System:**
+- Python 3.11+
+- Rust (for tools)
+- Podman (for services)
 
-**Key packages:**
-- cortex: kafka-python, openai, python-dotenv
-- broca: kafka-python, TTS, python-dotenv
-- hippocampus: chromadb, sentence-transformers, PyMuPDF, ebooklib, python-docx
-- tools/write: Rust + Axum
-- tools/chat: Rust + Ratatui + tiktoken-rs
+**AI Backend (at least one):**
+- Ollama (local) — `brew install ollama`
+- Anthropic API key
+- Exo (distributed)
+
+**Optional:**
+- Pandoc (Office document conversion)
+- FFmpeg (audio processing)
+
+Run `python3 setup.py` to check all dependencies.
 
 ## Troubleshooting
 
-| Problem | Check | Fix |
-|---------|-------|-----|
-| Kafka connection error | `podman ps` | `./up` or `podman restart kafkaserver` |
-| ChromaDB connection error | `podman ps` | `./up` or `podman restart chromadb` |
-| Exo connection error | Exo running? | Start Exo before Cortex |
-| Tool not responding | `curl localhost:8770/health` | Check tool logs |
+| Issue | Solution |
+|-------|----------|
+| No response after wake word | Check `logs/temporal-consumer.log` for STT errors |
+| Context not being retrieved | Verify documents are in `~/Documents/AI_IN` and indexed |
+| Audio not playing | Run `/audio-status`, check Broca logs |
+| AI not responding | Verify backend is running (Ollama/Exo/API key) |
 
-## Logs
+## Why "Olorin"?
 
-```bash
-tail -f logs/cortex-consumer.log
-tail -f logs/broca-consumer.log
-tail -f logs/hippocampus-ingest.log
-tail -f logs/enrichener.log
-```
+Olorin is Gandalf's original name in Valinor—a Maia spirit who walked among the peoples of Middle-earth, offering wisdom and guidance. Like its namesake, this assistant is meant to be a wise companion: always present, deeply knowledgeable, and ready to help when called upon.
+
+---
+
+*See `CLAUDE.md` for detailed technical documentation.*
