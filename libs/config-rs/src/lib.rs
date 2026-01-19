@@ -72,6 +72,7 @@ fn key_to_path(key: &str) -> Option<&'static str> {
         "CORTEX_OUTPUT_TOPIC" => Some("cortex.output_topic"),
         "CORTEX_CONSUMER_GROUP" => Some("cortex.consumer_group"),
         "CORTEX_AUTO_OFFSET_RESET" => Some("cortex.auto_offset_reset"),
+        "CORTEX_SYSTEM_PROMPT" => Some("cortex.system_prompt"),
         // Hippocampus
         "INPUT_DIR" => Some("hippocampus.input_dir"),
         "CHROMADB_HOST" => Some("hippocampus.chromadb.host"),

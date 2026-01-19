@@ -92,6 +92,14 @@ class CortexConfig:
             p.strip().lower() for p in reset_patterns_str.split(",")
         ]
 
+        # System prompt for context injection
+        self.system_prompt = self.cfg.get(
+            "CORTEX_SYSTEM_PROMPT",
+            "You are an AI assistant who provides help to a user based on provided "
+            "context and instruction prompts. Your goal is to answer questions and "
+            "complete tasks based on the user's input.",
+        )
+
     def reload(self) -> bool:
         """Check for config changes and reload if needed"""
         if self.cfg.reload():
@@ -789,9 +797,12 @@ class ExoConsumer:
 
         context_block = "\n\n".join(context_parts)
 
-        # Single combined message with context + prompt
+        # Single combined message with system prompt, context + user prompt
         # This format works reliably across all tested models and backends
-        return f"""Use the following reference context to answer my question.
+        system_prompt = self.config.system_prompt
+        return f"""{system_prompt}
+
+Use the following reference context to answer my question.
 
 <context>
 {context_block}

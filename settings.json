@@ -31,7 +31,8 @@
     "auto_offset_reset": "earliest",
     "consumer_group": "exo-consumer-group",
     "input_topic": "prompts",
-    "output_topic": "ai_out"
+    "output_topic": "ai_out",
+    "system_prompt": "You are an AI assistant who provides help to a user based on provided context and instruction prompts. Your goal is to answer questions and complete tasks based on the user's input."
   },
   "enrichener": {
     "auto_offset_reset": "earliest",

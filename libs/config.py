@@ -38,6 +38,7 @@ _KEY_TO_PATH = {
     "CORTEX_OUTPUT_TOPIC": "cortex.output_topic",
     "CORTEX_CONSUMER_GROUP": "cortex.consumer_group",
     "CORTEX_AUTO_OFFSET_RESET": "cortex.auto_offset_reset",
+    "CORTEX_SYSTEM_PROMPT": "cortex.system_prompt",
     # Hippocampus
     "INPUT_DIR": "hippocampus.input_dir",
     "CHROMADB_HOST": "hippocampus.chromadb.host",
