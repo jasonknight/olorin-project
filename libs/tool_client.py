@@ -71,19 +71,23 @@ class ToolClient:
         self._tools_cache: dict[str, dict] = {}  # name -> metadata
         self._openai_cache: dict[str, dict] = {}  # name -> OpenAI format
 
-    def discover_tools(self) -> list[dict]:
+    def discover_tools(self, include_internal: bool = False) -> list[dict]:
         """
-        Discover all enabled and healthy tool servers.
+        Discover enabled and healthy tool servers.
 
         For each enabled tool in settings.json:
         1. Check /health endpoint
         2. If healthy, fetch /describe metadata
         3. Convert to OpenAI tool format
 
+        Args:
+            include_internal: If True, include internal tools (e.g., embeddings).
+                              Default False - only expose LLM-callable tools.
+
         Returns:
             List of OpenAI-format tool definitions for use in API calls
         """
-        tools = self.config.get_tools()
+        tools = self.config.get_tools(include_internal=include_internal)
         if not tools:
             logger.debug("No tools configured in settings.json")
             return []

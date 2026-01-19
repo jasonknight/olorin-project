@@ -103,8 +103,8 @@ pub fn create_tab_definitions() -> Vec<TabDef> {
                 SettingDef {
                     key: "inference.backend",
                     label: "Backend",
-                    description: "AI inference backend to use (exo or ollama)",
-                    input_type: InputType::Select(vec!["exo".into(), "ollama".into()]),
+                    description: "AI inference backend to use (exo, ollama, or anthropic)",
+                    input_type: InputType::Select(vec!["exo".into(), "ollama".into(), "anthropic".into()]),
                     default_value: Some(json!("ollama")),
                 },
                 SettingDef {
@@ -259,7 +259,41 @@ pub fn create_tab_definitions() -> Vec<TabDef> {
                 },
             ],
         },
-        // Tab 7: Broca
+        // Tab 7: Anthropic
+        TabDef {
+            name: "Anthropic",
+            settings: vec![
+                SettingDef {
+                    key: "anthropic.model_name",
+                    label: "Model Name",
+                    description: "Claude model to use (e.g., claude-sonnet-4-20250514)",
+                    input_type: InputType::Text,
+                    default_value: Some(json!("claude-sonnet-4-20250514")),
+                },
+                SettingDef {
+                    key: "anthropic.temperature",
+                    label: "Temperature",
+                    description: "Response randomness (0.0=deterministic, 1.0=creative)",
+                    input_type: InputType::FloatNumber {
+                        min: Some(0.0),
+                        max: Some(1.0),
+                    },
+                    default_value: Some(json!(0.7)),
+                },
+                SettingDef {
+                    key: "anthropic.max_tokens",
+                    label: "Max Tokens",
+                    description: "Maximum response length",
+                    input_type: InputType::IntNumber {
+                        min: Some(1),
+                        max: Some(200000),
+                    },
+                    default_value: Some(json!(4096)),
+                },
+                // NOTE: API key is not shown here - it must be set in .env file
+            ],
+        },
+        // Tab 8: Broca (was Tab 7)
         TabDef {
             name: "Broca",
             settings: vec![
@@ -285,18 +319,11 @@ pub fn create_tab_definitions() -> Vec<TabDef> {
                     default_value: Some(json!("earliest")),
                 },
                 SettingDef {
-                    key: "broca.tts.model_name",
-                    label: "TTS Model",
-                    description: "Coqui TTS model to load (F5 to refresh list)",
-                    input_type: InputType::DynamicSelect(DynamicSource::TTSModels),
-                    default_value: Some(json!("tts_models/en/vctk/vits")),
-                },
-                SettingDef {
-                    key: "broca.tts.speaker",
-                    label: "TTS Speaker",
-                    description: "Speaker/voice ID for multi-speaker models (F5 to refresh)",
-                    input_type: InputType::DynamicSelect(DynamicSource::TTSSpeakers),
-                    default_value: Some(json!("p272")),
+                    key: "broca.tts.engine",
+                    label: "TTS Engine",
+                    description: "Text-to-speech backend: coqui (local neural TTS) or orca (Picovoice streaming TTS)",
+                    input_type: InputType::Select(vec!["coqui".into(), "orca".into()]),
+                    default_value: Some(json!("coqui")),
                 },
                 SettingDef {
                     key: "broca.tts.output_dir",
@@ -304,6 +331,58 @@ pub fn create_tab_definitions() -> Vec<TabDef> {
                     description: "Directory where audio files are saved",
                     input_type: InputType::Text,
                     default_value: Some(json!("output")),
+                },
+                // Coqui TTS settings
+                SettingDef {
+                    key: "broca.tts.model_name",
+                    label: "Coqui Model",
+                    description: "Coqui TTS model to load (F5 to refresh). Only used when engine=coqui",
+                    input_type: InputType::DynamicSelect(DynamicSource::TTSModels),
+                    default_value: Some(json!("tts_models/en/vctk/vits")),
+                },
+                SettingDef {
+                    key: "broca.tts.speaker",
+                    label: "Coqui Speaker",
+                    description: "Speaker/voice ID for multi-speaker Coqui models (F5 to refresh)",
+                    input_type: InputType::DynamicSelect(DynamicSource::TTSSpeakers),
+                    default_value: Some(json!("p272")),
+                },
+                // Orca TTS settings
+                SettingDef {
+                    key: "broca.orca.access_key",
+                    label: "Orca Access Key",
+                    description: "Picovoice access key (same as Porcupine). Get from console.picovoice.ai",
+                    input_type: InputType::Text,
+                    default_value: Some(Value::Null),
+                },
+                SettingDef {
+                    key: "broca.orca.voice",
+                    label: "Orca Voice",
+                    description: "Voice model for Orca TTS. Format: language_gender",
+                    input_type: InputType::Select(vec![
+                        "en_female".into(),
+                        "en_male".into(),
+                        "de_female".into(),
+                        "de_male".into(),
+                        "es_female".into(),
+                        "es_male".into(),
+                        "fr_female".into(),
+                        "fr_male".into(),
+                        "it_female".into(),
+                        "it_male".into(),
+                        "ja_female".into(),
+                        "ko_female".into(),
+                        "pt_female".into(),
+                        "pt_male".into(),
+                    ]),
+                    default_value: Some(json!("en_female")),
+                },
+                SettingDef {
+                    key: "broca.orca.model_path",
+                    label: "Orca Model Path",
+                    description: "Optional custom .pv model file path (leave null for built-in voices)",
+                    input_type: InputType::NullableText,
+                    default_value: Some(Value::Null),
                 },
             ],
         },

@@ -3,20 +3,33 @@
 Unit tests for ExoConsumer class.
 
 Tests chat history integration, message processing, and reset functionality
-with mocked Kafka and OpenAI dependencies.
+with mocked Kafka and inference dependencies.
+
+Note: The refactored consumer combines context and prompt into a single user message
+(as documented in CLAUDE.md) to avoid context loss with models like Deepseek R1.
 """
 
 import os
 import sys
 import json
 import tempfile
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 # Add parent directories to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from libs.chat_store import ChatStore
+from libs.context_formatter import ContextFormatter
+
+
+def create_mock_inference():
+    """Create a mock inference client."""
+    mock = Mock()
+    mock.backend_type = Mock(value="exo")
+    mock.backend = Mock()
+    mock.backend.client = Mock()
+    return mock
 
 
 class TestResetCommandDetection:
@@ -24,13 +37,15 @@ class TestResetCommandDetection:
 
     def test_exact_match_reset(self, mock_config):
         """Should detect exact '/reset' command."""
-        # Import here to avoid issues with global state
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -46,9 +61,12 @@ class TestResetCommandDetection:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -64,9 +82,12 @@ class TestResetCommandDetection:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -81,9 +102,12 @@ class TestResetCommandDetection:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -98,103 +122,69 @@ class TestResetCommandDetection:
 
 
 class TestContextFormatting:
-    """Tests for RAG context formatting as user/assistant exchange."""
+    """Tests for RAG context formatting using ContextFormatter."""
 
-    def test_format_single_context_chunk(self, mock_config):
+    def test_format_single_context_chunk(self):
         """Should format single context chunk correctly."""
-        with (
-            patch("consumer.KafkaConsumer"),
-            patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
-            patch("consumer.ContextStore"),
-            patch("consumer.ChatStore"),
-        ):
-            from consumer import ExoConsumer
+        formatter = ContextFormatter(system_prompt="You are a helpful assistant.")
 
-            consumer = ExoConsumer(mock_config)
+        chunks = [
+            {
+                "content": "Python is a programming language.",
+                "source": "docs.md",
+                "h1": "Introduction",
+            }
+        ]
 
-            chunks = [
-                {
-                    "content": "Python is a programming language.",
-                    "source": "docs.md",
-                    "h1": "Introduction",
-                    "h2": None,
-                    "h3": None,
-                }
-            ]
+        combined = formatter.format_context_with_prompt(chunks, "What is Python?")
 
-            combined = consumer._format_context_with_prompt(chunks, "What is Python?")
+        # Should return a single combined string
+        assert isinstance(combined, str)
+        assert "Python is a programming language." in combined
+        assert "docs.md" in combined
+        assert "Introduction" in combined
+        assert "What is Python?" in combined
+        assert "<context>" in combined
+        assert "</context>" in combined
 
-            # Should return a single combined string
-            assert isinstance(combined, str)
-            assert "Python is a programming language." in combined
-            assert "docs.md" in combined
-            assert "Introduction" in combined
-            assert "What is Python?" in combined
-            assert "<context>" in combined
-            assert "</context>" in combined
-
-    def test_format_multiple_context_chunks(self, mock_config):
+    def test_format_multiple_context_chunks(self):
         """Should format multiple context chunks correctly."""
-        with (
-            patch("consumer.KafkaConsumer"),
-            patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
-            patch("consumer.ContextStore"),
-            patch("consumer.ChatStore"),
-        ):
-            from consumer import ExoConsumer
+        formatter = ContextFormatter()
 
-            consumer = ExoConsumer(mock_config)
+        chunks = [
+            {
+                "content": "First chunk",
+                "source": "file1.md",
+                "h1": "Header1",
+            },
+            {
+                "content": "Second chunk",
+                "source": "file2.md",
+                "h1": "Header2",
+                "h2": "Sub",
+            },
+        ]
 
-            chunks = [
-                {
-                    "content": "First chunk",
-                    "source": "file1.md",
-                    "h1": "Header1",
-                    "h2": None,
-                    "h3": None,
-                },
-                {
-                    "content": "Second chunk",
-                    "source": "file2.md",
-                    "h1": "Header2",
-                    "h2": "Sub",
-                    "h3": None,
-                },
-            ]
+        combined = formatter.format_context_with_prompt(chunks, "Summarize the content")
 
-            combined = consumer._format_context_with_prompt(
-                chunks, "Summarize the content"
-            )
+        assert isinstance(combined, str)
+        assert "First chunk" in combined
+        assert "Second chunk" in combined
+        assert "file1.md" in combined
+        assert "file2.md" in combined
+        assert "Summarize the content" in combined
 
-            assert isinstance(combined, str)
-            assert "First chunk" in combined
-            assert "Second chunk" in combined
-            assert "file1.md" in combined
-            assert "file2.md" in combined
-            assert "Summarize the content" in combined
-
-    def test_format_context_with_missing_metadata(self, mock_config):
+    def test_format_context_with_missing_metadata(self):
         """Should handle chunks with missing metadata gracefully."""
-        with (
-            patch("consumer.KafkaConsumer"),
-            patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
-            patch("consumer.ContextStore"),
-            patch("consumer.ChatStore"),
-        ):
-            from consumer import ExoConsumer
+        formatter = ContextFormatter()
 
-            consumer = ExoConsumer(mock_config)
+        chunks = [{"content": "Content only"}]  # No source, h1, etc.
 
-            chunks = [{"content": "Content only"}]  # No source, h1, etc.
+        combined = formatter.format_context_with_prompt(chunks, "What is this?")
 
-            combined = consumer._format_context_with_prompt(chunks, "What is this?")
-
-            assert isinstance(combined, str)
-            assert "Content only" in combined
-            assert "What is this?" in combined
+        assert isinstance(combined, str)
+        assert "Content only" in combined
+        assert "What is this?" in combined
 
 
 class TestMessageHistoryBuilding:
@@ -205,14 +195,18 @@ class TestMessageHistoryBuilding:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
             consumer = ExoConsumer(mock_config)
             consumer.chat_store = None  # Simulate disabled chat history
+            consumer.available_tools = []  # No tools
 
             messages = consumer._build_messages_with_history(
                 prompt="Hello", message_id="test_001", context_chunks=None
@@ -223,26 +217,27 @@ class TestMessageHistoryBuilding:
             assert messages[0]["content"] == "Hello"
 
     def test_build_messages_with_context_no_history(self, mock_config):
-        """Should include context exchange even without chat store."""
+        """Should combine context and prompt in single user message."""
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
             consumer = ExoConsumer(mock_config)
             consumer.chat_store = None
+            consumer.available_tools = []
 
             context_chunks = [
                 {
                     "content": "Context info",
                     "source": "doc.md",
-                    "h1": None,
-                    "h2": None,
-                    "h3": None,
                 }
             ]
 
@@ -250,21 +245,23 @@ class TestMessageHistoryBuilding:
                 prompt="Question?", message_id="test_002", context_chunks=context_chunks
             )
 
-            # Should have: context user + context assistant + actual user = 3
-            assert len(messages) == 3
+            # Should have: combined context + prompt in single user message
+            assert len(messages) == 1
             assert messages[0]["role"] == "user"
             assert "Context info" in messages[0]["content"]
-            assert messages[1]["role"] == "assistant"
-            assert messages[2]["role"] == "user"
-            assert messages[2]["content"] == "Question?"
+            assert "Question?" in messages[0]["content"]
+            assert "<context>" in messages[0]["content"]
 
     def test_build_messages_with_history(self, mock_config):
         """Should include conversation history in messages array."""
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -273,6 +270,7 @@ class TestMessageHistoryBuilding:
                 mock_config.chat_db_path = chat_db_path
 
                 consumer = ExoConsumer(mock_config)
+                consumer.available_tools = []
 
                 # Manually set up chat store with history
                 consumer.chat_store = ChatStore(chat_db_path)
@@ -298,8 +296,11 @@ class TestMessageHistoryBuilding:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -308,6 +309,7 @@ class TestMessageHistoryBuilding:
                 mock_config.chat_db_path = chat_db_path
 
                 consumer = ExoConsumer(mock_config)
+                consumer.available_tools = []
                 consumer.chat_store = ChatStore(chat_db_path)
 
                 conv_id = consumer.chat_store.get_or_create_active_conversation()
@@ -316,11 +318,9 @@ class TestMessageHistoryBuilding:
 
                 context_chunks = [
                     {
+                        "id": "ctx_001",
                         "content": "Relevant context",
                         "source": "ref.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
                     }
                 ]
 
@@ -330,15 +330,13 @@ class TestMessageHistoryBuilding:
                     context_chunks=context_chunks,
                 )
 
-                # Should have: 2 history + 2 context exchange + 1 new = 5
-                assert len(messages) == 5
-
-                # Verify order: history first, then context, then new prompt
+                # Should have: 2 history + 1 combined context+prompt = 3
+                assert len(messages) == 3
                 assert messages[0]["content"] == "First message"
                 assert messages[1]["content"] == "First response"
-                assert "Relevant context" in messages[2]["content"]  # Context user
-                assert "I understand" in messages[3]["content"]  # Context assistant
-                assert messages[4]["content"] == "Question with context"
+                # Last message should be combined context + prompt
+                assert "Relevant context" in messages[2]["content"]
+                assert "Question with context" in messages[2]["content"]
 
 
 class TestResetCommandHandling:
@@ -349,8 +347,11 @@ class TestResetCommandHandling:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer", return_value=mock_kafka_producer),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -381,8 +382,11 @@ class TestResetCommandHandling:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer", return_value=mock_kafka_producer),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -405,9 +409,12 @@ class TestResetCommandHandling:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
             patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -421,47 +428,30 @@ class TestResetCommandHandling:
 class TestMessageParsing:
     """Tests for Kafka message parsing."""
 
-    def test_parse_json_message(self, mock_config):
+    def test_parse_json_message(self):
         """Should correctly parse JSON formatted messages."""
-        with (
-            patch("consumer.KafkaConsumer"),
-            patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
-            patch("consumer.ContextStore"),
-            patch("consumer.ChatStore"),
-        ):
-            from consumer import ExoConsumer
+        # Test the parsing logic extracted from process_message
+        message = '{"text": "Hello", "id": "msg_123", "context_available": true, "contexts_stored": 2}'
+        parsed = json.loads(message)
 
-            ExoConsumer(mock_config)  # Verify initialization works
+        prompt = parsed.get("text", "") or parsed.get("prompt", "")
+        assert prompt == "Hello"
+        assert parsed.get("id") == "msg_123"
+        assert parsed.get("context_available") is True
+        assert parsed.get("contexts_stored") == 2
 
-            # Test the parsing logic extracted from process_message
-            message = '{"prompt": "Hello", "id": "msg_123", "context_available": true, "contexts_stored": 2}'
-            parsed = json.loads(message)
-
-            assert parsed.get("prompt") == "Hello"
-            assert parsed.get("id") == "msg_123"
-            assert parsed.get("context_available") is True
-            assert parsed.get("contexts_stored") == 2
-
-    def test_parse_plain_text_message(self, mock_config):
+    def test_parse_plain_text_message(self):
         """Should handle plain text messages gracefully."""
-        with (
-            patch("consumer.KafkaConsumer"),
-            patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
-            patch("consumer.ContextStore"),
-            patch("consumer.ChatStore"),
-        ):
-            # Plain text that's not valid JSON
-            message = "Just a plain text message"
+        # Plain text that's not valid JSON
+        message = "Just a plain text message"
 
-            try:
-                json.loads(message)
-                assert False, "Should have raised JSONDecodeError"
-            except json.JSONDecodeError:
-                # This is expected - plain text should be treated as the prompt itself
-                prompt = message
-                assert prompt == "Just a plain text message"
+        try:
+            json.loads(message)
+            assert False, "Should have raised JSONDecodeError"
+        except json.JSONDecodeError:
+            # This is expected - plain text should be treated as the prompt itself
+            prompt = message
+            assert prompt == "Just a plain text message"
 
 
 class TestIntegration:
@@ -472,8 +462,11 @@ class TestIntegration:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer", return_value=mock_kafka_producer),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -484,6 +477,7 @@ class TestIntegration:
                 consumer = ExoConsumer(mock_config)
                 consumer.producer = mock_kafka_producer
                 consumer.chat_store = ChatStore(chat_db_path)
+                consumer.available_tools = []
 
                 # Simulate conversation
                 conv_id = consumer.chat_store.get_or_create_active_conversation()
@@ -517,12 +511,15 @@ class TestIntegration:
                 assert messages[0]["content"] == "Hello again"
 
     def test_context_injection_preserves_history(self, mock_config):
-        """Context should be injected after history, before new prompt."""
+        """Context should be combined with prompt after history."""
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -532,6 +529,7 @@ class TestIntegration:
 
                 consumer = ExoConsumer(mock_config)
                 consumer.chat_store = ChatStore(chat_db_path)
+                consumer.available_tools = []
 
                 # Build up conversation history
                 conv_id = consumer.chat_store.get_or_create_active_conversation()
@@ -541,11 +539,9 @@ class TestIntegration:
                 # Now request with context
                 context = [
                     {
+                        "id": "ctx_001",
                         "content": "RAG context",
                         "source": "doc.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
                     }
                 ]
 
@@ -555,25 +551,28 @@ class TestIntegration:
                     context_chunks=context,
                 )
 
-                # Verify order: history (2) + context exchange (2) + new prompt (1) = 5
-                assert len(messages) == 5
+                # Verify order: history (2) + combined context+prompt (1) = 3
+                assert len(messages) == 3
                 assert messages[0]["content"] == "History message 1"
                 assert messages[1]["content"] == "History response 1"
+                # Combined message has context and prompt
                 assert "RAG context" in messages[2]["content"]
-                assert "I understand" in messages[3]["content"]
-                assert messages[4]["content"] == "Question about docs"
+                assert "Question about docs" in messages[2]["content"]
 
 
 class TestContextPersistenceInChatHistory:
     """Tests for RAG context being stored in chat history for conversation continuity."""
 
-    def test_context_exchange_stored_in_chat_history(self, mock_config):
-        """Context exchange should be stored in chat history when injected."""
+    def test_context_stored_in_chat_history(self, mock_config):
+        """Context-with-prompt should be stored in chat history."""
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -583,14 +582,13 @@ class TestContextPersistenceInChatHistory:
 
                 consumer = ExoConsumer(mock_config)
                 consumer.chat_store = ChatStore(chat_db_path)
+                consumer.available_tools = []
 
                 context_chunks = [
                     {
+                        "id": "ctx_001",
                         "content": "Python is a programming language.",
                         "source": "docs.md",
-                        "h1": "Intro",
-                        "h2": None,
-                        "h3": None,
                     }
                 ]
 
@@ -605,31 +603,24 @@ class TestContextPersistenceInChatHistory:
                 conv_id = consumer.chat_store.get_active_conversation_id()
                 stored_messages = consumer.chat_store.get_conversation_messages(conv_id)
 
-                # Should have: context user + context ack + user prompt = 3 messages
-                assert len(stored_messages) == 3
-
-                # First message should be the context user message
+                # Should have 1 message with combined context + prompt
+                assert len(stored_messages) == 1
                 assert stored_messages[0]["role"] == "user"
                 assert (
                     "Python is a programming language" in stored_messages[0]["content"]
                 )
-                assert "knowledge base" in stored_messages[0]["content"]
-
-                # Second message should be the context acknowledgment
-                assert stored_messages[1]["role"] == "assistant"
-                assert "I understand" in stored_messages[1]["content"]
-
-                # Third message should be the actual user prompt
-                assert stored_messages[2]["role"] == "user"
-                assert stored_messages[2]["content"] == "What is Python?"
+                assert "What is Python?" in stored_messages[0]["content"]
 
     def test_followup_message_sees_context_in_history(self, mock_config):
-        """Follow-up messages should include previously stored context in their history."""
+        """Follow-up messages should see previously stored context in their history."""
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -639,15 +630,14 @@ class TestContextPersistenceInChatHistory:
 
                 consumer = ExoConsumer(mock_config)
                 consumer.chat_store = ChatStore(chat_db_path)
+                consumer.available_tools = []
 
                 # First message with context
                 context_chunks = [
                     {
+                        "id": "ctx_001",
                         "content": "Python was created by Guido van Rossum.",
                         "source": "history.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
                     }
                 ]
 
@@ -670,99 +660,17 @@ class TestContextPersistenceInChatHistory:
                     context_chunks=None,  # No new context
                 )
 
-                # The follow-up should see the original context in its history
-                # History should be: context user + context ack + original prompt + assistant response = 4
-                # Plus the new prompt = 5 total in messages array
-                assert len(followup_messages) == 5
+                # The follow-up should see the original context+prompt in its history
+                # History: combined context+prompt (1) + assistant response (1) + new prompt (1) = 3
+                assert len(followup_messages) == 3
 
                 # Verify the context is in the history
+                assert "Guido van Rossum" in followup_messages[0]["content"]
+                assert "Guido van Rossum in 1991" in followup_messages[1]["content"]
                 assert (
-                    "Guido van Rossum" in followup_messages[0]["content"]
-                )  # Context user message
-                assert "I understand" in followup_messages[1]["content"]  # Context ack
-                assert (
-                    followup_messages[2]["content"] == "Tell me about Python's history"
-                )
-                assert "Guido van Rossum in 1991" in followup_messages[3]["content"]
-                assert (
-                    followup_messages[4]["content"]
+                    followup_messages[2]["content"]
                     == "Can you tell me more about Guido?"
                 )
-
-    def test_multiple_context_exchanges_accumulate(self, mock_config):
-        """Multiple context-enriched messages should accumulate context in history."""
-        with (
-            patch("consumer.KafkaConsumer"),
-            patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
-            patch("consumer.ContextStore"),
-        ):
-            from consumer import ExoConsumer
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                chat_db_path = os.path.join(tmpdir, "chat.db")
-                mock_config.chat_db_path = chat_db_path
-
-                consumer = ExoConsumer(mock_config)
-                consumer.chat_store = ChatStore(chat_db_path)
-
-                # First message with context about Python
-                context1 = [
-                    {
-                        "content": "Python is interpreted.",
-                        "source": "python.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
-                    }
-                ]
-                consumer._build_messages_with_history(
-                    prompt="What is Python?",
-                    message_id="multi_001",
-                    context_chunks=context1,
-                )
-
-                # Simulate response
-                conv_id = consumer.chat_store.get_active_conversation_id()
-                consumer.chat_store.add_assistant_message(
-                    conv_id, "Python is an interpreted language."
-                )
-
-                # Second message with context about Java
-                context2 = [
-                    {
-                        "content": "Java is compiled.",
-                        "source": "java.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
-                    }
-                ]
-                consumer._build_messages_with_history(
-                    prompt="What is Java?",
-                    message_id="multi_002",
-                    context_chunks=context2,
-                )
-
-                # Simulate response
-                consumer.chat_store.add_assistant_message(
-                    conv_id, "Java is a compiled language."
-                )
-
-                # Third message - no new context, should see both previous contexts
-                final_messages = consumer._build_messages_with_history(
-                    prompt="Compare them", message_id="multi_003", context_chunks=None
-                )
-
-                # Should have accumulated:
-                # ctx1 user + ctx1 ack + prompt1 + response1 + ctx2 user + ctx2 ack + prompt2 + response2 + prompt3
-                # = 9 messages
-                assert len(final_messages) == 9
-
-                # Verify both contexts are present in history
-                all_content = " ".join(m["content"] for m in final_messages)
-                assert "Python is interpreted" in all_content
-                assert "Java is compiled" in all_content
 
     def test_context_cleared_on_conversation_reset(
         self, mock_config, mock_kafka_producer
@@ -771,8 +679,11 @@ class TestContextPersistenceInChatHistory:
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer", return_value=mock_kafka_producer),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
@@ -783,15 +694,14 @@ class TestContextPersistenceInChatHistory:
                 consumer = ExoConsumer(mock_config)
                 consumer.producer = mock_kafka_producer
                 consumer.chat_store = ChatStore(chat_db_path)
+                consumer.available_tools = []
 
                 # First message with context
                 context_chunks = [
                     {
+                        "id": "ctx_001",
                         "content": "Important context info.",
                         "source": "doc.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
                     }
                 ]
                 consumer._build_messages_with_history(
@@ -805,9 +715,7 @@ class TestContextPersistenceInChatHistory:
                 old_messages = consumer.chat_store.get_conversation_messages(
                     old_conv_id
                 )
-                assert (
-                    len(old_messages) == 3
-                )  # context user + context ack + user prompt
+                assert len(old_messages) == 1
                 assert "Important context info" in old_messages[0]["content"]
 
                 # Reset conversation
@@ -826,46 +734,183 @@ class TestContextPersistenceInChatHistory:
                 old_messages_after_reset = (
                     consumer.chat_store.get_conversation_messages(old_conv_id)
                 )
-                assert len(old_messages_after_reset) == 3
+                assert len(old_messages_after_reset) == 1
 
-    def test_context_stored_with_prompt_id_suffix(self, mock_config):
-        """Context messages should be stored with _context suffix on prompt_id."""
+
+class TestExecuteToolCalls:
+    """Tests for _execute_tool_calls method."""
+
+    def test_string_result_passed_through(self, mock_config):
+        """Tool results that are strings should be passed through unchanged."""
         with (
             patch("consumer.KafkaConsumer"),
             patch("consumer.KafkaProducer"),
-            patch("consumer.OpenAI"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
             patch("consumer.ContextStore"),
+            patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
         ):
             from consumer import ExoConsumer
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                chat_db_path = os.path.join(tmpdir, "chat.db")
-                mock_config.chat_db_path = chat_db_path
+            consumer = ExoConsumer(mock_config)
 
-                consumer = ExoConsumer(mock_config)
-                consumer.chat_store = ChatStore(chat_db_path)
+            # Mock tool client to return a string result
+            mock_tool_client = Mock()
+            mock_tool_client.call_tool.return_value = {
+                "success": True,
+                "result": "File written successfully",
+            }
+            consumer.tool_client = mock_tool_client
 
-                context_chunks = [
-                    {
-                        "content": "Test content",
-                        "source": "test.md",
-                        "h1": None,
-                        "h2": None,
-                        "h3": None,
-                    }
-                ]
+            tool_calls = [
+                {
+                    "id": "call_123",
+                    "function": {
+                        "name": "write",
+                        "arguments": '{"content": "test", "filename": "test.txt"}',
+                    },
+                }
+            ]
 
-                consumer._build_messages_with_history(
-                    prompt="Test prompt",
-                    message_id="prompt_id_test",
-                    context_chunks=context_chunks,
-                )
+            results = consumer._execute_tool_calls(tool_calls, None, None)
 
-                conv_id = consumer.chat_store.get_active_conversation_id()
-                stored_messages = consumer.chat_store.get_conversation_messages(conv_id)
+            assert len(results) == 1
+            assert results[0]["role"] == "tool"
+            assert results[0]["content"] == "File written successfully"
 
-                # First message (context user) should have _context suffix
-                assert stored_messages[0]["prompt_id"] == "prompt_id_test_context"
+    def test_dict_result_converted_to_json_string(self, mock_config):
+        """Tool results that are dicts should be converted to JSON strings."""
+        with (
+            patch("consumer.KafkaConsumer"),
+            patch("consumer.KafkaProducer"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
+            patch("consumer.ContextStore"),
+            patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
+        ):
+            from consumer import ExoConsumer
 
-                # Last message (actual prompt) should have original prompt_id
-                assert stored_messages[2]["prompt_id"] == "prompt_id_test"
+            consumer = ExoConsumer(mock_config)
+
+            # Mock tool client to return a dict result (like embeddings tool)
+            mock_tool_client = Mock()
+            mock_tool_client.call_tool.return_value = {
+                "success": True,
+                "result": {
+                    "embeddings": [[0.1, 0.2, 0.3]],
+                    "model": "nomic-embed-text-v1.5",
+                    "dimension": 768,
+                },
+            }
+            consumer.tool_client = mock_tool_client
+
+            tool_calls = [
+                {
+                    "id": "call_456",
+                    "function": {
+                        "name": "embeddings",
+                        "arguments": '{"texts": ["test"], "mode": "query"}',
+                    },
+                }
+            ]
+
+            results = consumer._execute_tool_calls(tool_calls, None, None)
+
+            assert len(results) == 1
+            assert results[0]["role"] == "tool"
+            # Should be a JSON string, not a dict
+            assert isinstance(results[0]["content"], str)
+            # Should be valid JSON
+            parsed = json.loads(results[0]["content"])
+            assert parsed["embeddings"] == [[0.1, 0.2, 0.3]]
+            assert parsed["model"] == "nomic-embed-text-v1.5"
+
+    def test_list_result_converted_to_json_string(self, mock_config):
+        """Tool results that are lists should be converted to JSON strings."""
+        with (
+            patch("consumer.KafkaConsumer"),
+            patch("consumer.KafkaProducer"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
+            patch("consumer.ContextStore"),
+            patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
+        ):
+            from consumer import ExoConsumer
+
+            consumer = ExoConsumer(mock_config)
+
+            # Mock tool client to return a list result
+            mock_tool_client = Mock()
+            mock_tool_client.call_tool.return_value = {
+                "success": True,
+                "result": ["item1", "item2", "item3"],
+            }
+            consumer.tool_client = mock_tool_client
+
+            tool_calls = [
+                {
+                    "id": "call_789",
+                    "function": {
+                        "name": "search",
+                        "arguments": '{"query": "test"}',
+                    },
+                }
+            ]
+
+            results = consumer._execute_tool_calls(tool_calls, None, None)
+
+            assert len(results) == 1
+            assert isinstance(results[0]["content"], str)
+            assert json.loads(results[0]["content"]) == ["item1", "item2", "item3"]
+
+    def test_error_result_formatted_as_string(self, mock_config):
+        """Tool errors should be formatted as error strings."""
+        with (
+            patch("consumer.KafkaConsumer"),
+            patch("consumer.KafkaProducer"),
+            patch(
+                "consumer.get_inference_client", return_value=create_mock_inference()
+            ),
+            patch("consumer.ContextStore"),
+            patch("consumer.ChatStore"),
+            patch("consumer.ToolClient"),
+        ):
+            from consumer import ExoConsumer
+
+            consumer = ExoConsumer(mock_config)
+
+            # Mock tool client to return an error
+            mock_tool_client = Mock()
+            mock_tool_client.call_tool.return_value = {
+                "success": False,
+                "error": {
+                    "type": "ValidationError",
+                    "message": "Missing required parameter",
+                },
+            }
+            consumer.tool_client = mock_tool_client
+
+            tool_calls = [
+                {
+                    "id": "call_err",
+                    "function": {
+                        "name": "write",
+                        "arguments": "{}",
+                    },
+                }
+            ]
+
+            results = consumer._execute_tool_calls(tool_calls, None, None)
+
+            assert len(results) == 1
+            assert results[0]["role"] == "tool"
+            assert (
+                "Error: ValidationError: Missing required parameter"
+                in results[0]["content"]
+            )

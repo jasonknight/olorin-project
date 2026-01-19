@@ -3,7 +3,16 @@
     "auto_offset_reset": "earliest",
     "consumer_group": "tts-consumer-group",
     "kafka_topic": "ai_out",
+    "orca": {
+      "_model_path_note": "Optional custom .pv model file path. Leave null to use built-in voice models.",
+      "_voice_options": "en_female, en_male, de_female, de_male, es_female, es_male, fr_female, fr_male, it_female, it_male, ja_female, ko_female, pt_female, pt_male",
+      "access_key": "H7IauigF7dKSHFcCiltMzra0EZW2TsPUIK/HnjUTXCJSeirS3Xxhag==",
+      "model_path": null,
+      "voice": "en_female"
+    },
     "tts": {
+      "_engine_options": "coqui, orca",
+      "engine": "orca",
       "model_name": "tts_models/en/vctk/vits",
       "output_dir": "output",
       "speaker": "p272"
@@ -32,7 +41,8 @@
     "consumer_group": "exo-consumer-group",
     "input_topic": "prompts",
     "output_topic": "ai_out",
-    "system_prompt": "You are an AI assistant who provides help to a user based on provided context and instruction prompts. Your goal is to answer questions and complete tasks based on the user's input."
+    "system_prompt": "You are an AI assistant who provides help to a user based on provided context and instruction prompts. Your goal is to answer questions and complete tasks based on the user's input.",
+    "tool_result_context_limit": 0.3
   },
   "enrichener": {
     "auto_offset_reset": "earliest",
@@ -110,8 +120,13 @@
   "ollama": {
     "base_url": "http://localhost:11434",
     "max_tokens": null,
-    "model_name": "mistral-nemo:12b",
+    "model_name": "deepseek-r1:70b",
     "temperature": 0.7
+  },
+  "anthropic": {
+    "model_name": "claude-sonnet-4-20250514",
+    "temperature": 0.7,
+    "max_tokens": 4096
   },
   "state": {
     "db_path": "./data/state.db"
@@ -143,7 +158,7 @@
         "that is all",
         "end message"
       ],
-      "timeout_seconds": 3.0,
+      "timeout_seconds": 5.0,
       "vad_threshold": 0.5
     },
     "stt": {
@@ -155,6 +170,12 @@
       "model": "small",
       "model_dir": "./temporal/data/models"
     },
+    "vad": {
+      "calibration_chunks": 4,
+      "max_duration": 300.0,
+      "silence_mult": 1.1,
+      "speech_mult": 2.0
+    },
     "wake_word": {
       "buffer_seconds": 3.0,
       "phrase": "hey computer"
@@ -164,6 +185,7 @@
     "embeddings": {
       "document_prefix": "search_document: ",
       "enabled": true,
+      "internal": true,
       "model": "nomic-ai/nomic-embed-text-v1.5",
       "port": 8771,
       "query_prefix": "search_query: "

@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 
 
+# Secret keys - NEVER read from settings.json, only from .env
+# These are sensitive values like API keys that should not be stored in version control
+_SECRET_KEYS = {
+    "ANTHROPIC_API_KEY",
+    # Future secret keys can be added here
+}
+
+
 # Mapping from flat keys to JSON paths for backward compatibility
 _KEY_TO_PATH = {
     # Global
@@ -30,15 +38,21 @@ _KEY_TO_PATH = {
     "BROCA_KAFKA_TOPIC": "broca.kafka_topic",
     "BROCA_CONSUMER_GROUP": "broca.consumer_group",
     "BROCA_AUTO_OFFSET_RESET": "broca.auto_offset_reset",
+    "TTS_ENGINE": "broca.tts.engine",
     "TTS_MODEL_NAME": "broca.tts.model_name",
     "TTS_SPEAKER": "broca.tts.speaker",
     "TTS_OUTPUT_DIR": "broca.tts.output_dir",
+    # Broca Orca TTS
+    "ORCA_ACCESS_KEY": "broca.orca.access_key",
+    "ORCA_VOICE": "broca.orca.voice",
+    "ORCA_MODEL_PATH": "broca.orca.model_path",
     # Cortex
     "CORTEX_INPUT_TOPIC": "cortex.input_topic",
     "CORTEX_OUTPUT_TOPIC": "cortex.output_topic",
     "CORTEX_CONSUMER_GROUP": "cortex.consumer_group",
     "CORTEX_AUTO_OFFSET_RESET": "cortex.auto_offset_reset",
     "CORTEX_SYSTEM_PROMPT": "cortex.system_prompt",
+    "CORTEX_TOOL_RESULT_CONTEXT_LIMIT": "cortex.tool_result_context_limit",
     # Hippocampus
     "INPUT_DIR": "hippocampus.input_dir",
     "CHROMADB_HOST": "hippocampus.chromadb.host",
@@ -106,6 +120,10 @@ _KEY_TO_PATH = {
     "OLLAMA_MODEL_NAME": "ollama.model_name",
     "OLLAMA_TEMPERATURE": "ollama.temperature",
     "OLLAMA_MAX_TOKENS": "ollama.max_tokens",
+    # Anthropic (Claude API inference backend)
+    "ANTHROPIC_MODEL_NAME": "anthropic.model_name",
+    "ANTHROPIC_TEMPERATURE": "anthropic.temperature",
+    "ANTHROPIC_MAX_TOKENS": "anthropic.max_tokens",
     # Temporal (voice-activated STT)
     "TEMPORAL_OUTPUT_TOPIC": "temporal.output_topic",
     "TEMPORAL_FEEDBACK_TOPIC": "temporal.feedback_topic",
@@ -133,6 +151,11 @@ _KEY_TO_PATH = {
     "TEMPORAL_VAD_ENERGY_SMOOTHING": "temporal.silence.vad_energy_smoothing",
     "TEMPORAL_VAD_USE_ENERGY": "temporal.silence.vad_use_energy",
     "TEMPORAL_VAD_DEBUG": "temporal.silence.vad_debug",
+    # Temporal VAD settings
+    "TEMPORAL_VAD_MAX_DURATION": "temporal.vad.max_duration",
+    "TEMPORAL_VAD_CALIBRATION_CHUNKS": "temporal.vad.calibration_chunks",
+    "TEMPORAL_VAD_SPEECH_MULT": "temporal.vad.speech_mult",
+    "TEMPORAL_VAD_SILENCE_MULT": "temporal.vad.silence_mult",
     "TEMPORAL_PAUSE_DURING_TTS": "temporal.behavior.pause_during_tts",
     # Temporal Porcupine wake word detection
     "TEMPORAL_PORCUPINE_ACCESS_KEY": "temporal.porcupine.access_key",
@@ -296,6 +319,47 @@ class Config:
                 return None
         return value
 
+    def _get_secret(self, key: str) -> Optional[str]:
+        """
+        Get a secret value from .env file or environment variable only.
+
+        Secret keys are never read from settings.json for security.
+        Checks environment variables first, then .env file.
+
+        Args:
+            key: The secret key name (e.g., 'ANTHROPIC_API_KEY')
+
+        Returns:
+            The secret value or None if not found
+        """
+        # Check environment variable first
+        env_value = os.environ.get(key)
+        if env_value:
+            return env_value
+
+        # Check .env file directly (not via parsed _data which may contain settings.json)
+        if self._env_path.exists():
+            with open(self._env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        env_key, _, value = line.partition("=")
+                        env_key = env_key.strip()
+                        if env_key == key:
+                            value = value.strip()
+                            # Remove quotes if present
+                            if (
+                                len(value) >= 2
+                                and value[0] == value[-1]
+                                and value[0] in ('"', "'")
+                            ):
+                                value = value[1:-1]
+                            return value
+
+        return None
+
     def reload(self) -> bool:
         """
         Reload configuration if the config file has changed.
@@ -328,6 +392,10 @@ class Config:
 
         Returns:
             The configuration value or default
+
+        Note:
+            Secret keys (defined in _SECRET_KEYS) are only read from .env file
+            or environment variables, never from settings.json.
         """
         # Check overrides first
         if key in self._overrides:
@@ -337,6 +405,11 @@ class Config:
             if isinstance(val, list):
                 return ",".join(str(v) for v in val)
             return str(val)
+
+        # Handle secret keys specially - only read from .env/environment
+        if key in _SECRET_KEYS:
+            secret_value = self._get_secret(key)
+            return secret_value if secret_value is not None else default
 
         # Map flat key to nested path if known
         path = _KEY_TO_PATH.get(key, key)
@@ -525,12 +598,17 @@ class Config:
         # Parse comma-separated string
         return [v.strip() for v in str(value).split(",")]
 
-    def get_tools(self) -> dict[str, dict[str, Any]]:
+    def get_tools(self, include_internal: bool = True) -> dict[str, dict[str, Any]]:
         """
-        Get all enabled AI tools with their configuration.
+        Get enabled AI tools with their configuration.
 
         Returns a dict mapping tool names to their configuration.
         Only includes tools where 'enabled' is True.
+
+        Args:
+            include_internal: If False, excludes tools with 'internal: true'.
+                              Internal tools are for system use (e.g., embeddings)
+                              and should not be exposed to the LLM.
 
         Returns:
             Dict like {'write': {'enabled': True, 'port': 8770}}
@@ -543,8 +621,12 @@ class Config:
         for tool_name, tool_config in tools_section.items():
             if isinstance(tool_config, dict):
                 enabled = tool_config.get("enabled", False)
-                if enabled:
-                    result[tool_name] = tool_config
+                if not enabled:
+                    continue
+                # Skip internal tools if requested
+                if not include_internal and tool_config.get("internal", False):
+                    continue
+                result[tool_name] = tool_config
         return result
 
     def set(self, key: str, value: Any) -> None:

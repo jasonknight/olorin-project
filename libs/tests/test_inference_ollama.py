@@ -382,3 +382,285 @@ class TestOllamaConfiguration:
         # finish_reason should indicate the limit was respected
         # "length" means the token limit was hit
         assert response.finish_reason in ("stop", "length")
+
+
+# Unit tests for message normalization - these don't require Ollama to be running
+class TestNormalizeMessagesForOllama:
+    """Unit tests for _normalize_messages_for_ollama method.
+
+    These tests verify the OpenAI-to-Ollama message format conversion
+    without requiring a running Ollama server.
+    """
+
+    @pytest.fixture
+    def backend(self):
+        """Create OllamaBackend instance for testing normalization."""
+        return OllamaBackend(
+            base_url="http://localhost:11434",
+            default_model="test-model",
+        )
+
+    def test_basic_user_message_unchanged(self, backend):
+        """Test that basic user messages pass through without modification."""
+        messages = [{"role": "user", "content": "Hello, world!"}]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        assert len(result) == 1
+        assert result[0]["role"] == "user"
+        assert result[0]["content"] == "Hello, world!"
+
+    def test_basic_assistant_message_unchanged(self, backend):
+        """Test that basic assistant messages pass through without modification."""
+        messages = [{"role": "assistant", "content": "I can help you."}]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        assert len(result) == 1
+        assert result[0]["role"] == "assistant"
+        assert result[0]["content"] == "I can help you."
+
+    def test_content_none_converted_to_empty_string(self, backend):
+        """Test that content: None is converted to empty string."""
+        messages = [{"role": "assistant", "content": None}]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        assert len(result) == 1
+        assert result[0]["content"] == ""
+
+    def test_tool_calls_converted_from_openai_format(self, backend):
+        """Test that tool_calls are converted from OpenAI to Ollama format."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Paris", "units": "celsius"}',
+                        },
+                    }
+                ],
+            }
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        assert len(result) == 1
+        assert result[0]["content"] == ""  # None converted to ""
+        assert "tool_calls" in result[0]
+        assert len(result[0]["tool_calls"]) == 1
+
+        tool_call = result[0]["tool_calls"][0]
+        # Should NOT have id or type (Ollama format)
+        assert "id" not in tool_call
+        assert "type" not in tool_call
+        # Should have function with name and arguments as object
+        assert "function" in tool_call
+        assert tool_call["function"]["name"] == "get_weather"
+        # Arguments should be parsed object, not string
+        assert tool_call["function"]["arguments"] == {
+            "city": "Paris",
+            "units": "celsius",
+        }
+
+    def test_multiple_tool_calls_converted(self, backend):
+        """Test that multiple tool_calls are all converted."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Paris"}',
+                        },
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "get_time",
+                            "arguments": '{"timezone": "UTC"}',
+                        },
+                    },
+                ],
+            }
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        assert len(result[0]["tool_calls"]) == 2
+        assert result[0]["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert result[0]["tool_calls"][0]["function"]["arguments"] == {"city": "Paris"}
+        assert result[0]["tool_calls"][1]["function"]["name"] == "get_time"
+        assert result[0]["tool_calls"][1]["function"]["arguments"] == {
+            "timezone": "UTC"
+        }
+
+    def test_tool_role_message_removes_tool_call_id(self, backend):
+        """Test that tool_call_id is removed from tool role messages."""
+        messages = [
+            {
+                "role": "tool",
+                "content": '{"temperature": 22, "condition": "sunny"}',
+                "tool_call_id": "call_abc123",
+            }
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        assert len(result) == 1
+        assert result[0]["role"] == "tool"
+        assert result[0]["content"] == '{"temperature": 22, "condition": "sunny"}'
+        # tool_call_id should be removed
+        assert "tool_call_id" not in result[0]
+
+    def test_invalid_json_arguments_handled_gracefully(self, backend):
+        """Test that invalid JSON in arguments is converted to empty object."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "test_func",
+                            "arguments": "not valid json {{{",
+                        },
+                    }
+                ],
+            }
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        # Should handle gracefully with empty object
+        assert result[0]["tool_calls"][0]["function"]["arguments"] == {}
+
+    def test_arguments_already_object_unchanged(self, backend):
+        """Test that arguments already as object are not double-converted."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "test_func",
+                            "arguments": {"key": "value"},  # Already an object
+                        },
+                    }
+                ],
+            }
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        # Should remain as object
+        assert result[0]["tool_calls"][0]["function"]["arguments"] == {"key": "value"}
+
+    def test_full_conversation_with_tool_flow(self, backend):
+        """Test a complete conversation flow with tool calls and results."""
+        messages = [
+            {"role": "user", "content": "What's the weather in Paris?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_weather_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Paris"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": '{"temp": 18, "condition": "cloudy"}',
+                "tool_call_id": "call_weather_1",
+            },
+            {
+                "role": "assistant",
+                "content": "The weather in Paris is 18°C and cloudy.",
+            },
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        # User message unchanged
+        assert result[0] == {"role": "user", "content": "What's the weather in Paris?"}
+
+        # Assistant with tool call - converted
+        assert result[1]["content"] == ""
+        assert result[1]["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert result[1]["tool_calls"][0]["function"]["arguments"] == {"city": "Paris"}
+        assert "id" not in result[1]["tool_calls"][0]
+
+        # Tool result - tool_call_id removed
+        assert result[2]["role"] == "tool"
+        assert "tool_call_id" not in result[2]
+
+        # Final assistant message unchanged
+        assert result[3]["content"] == "The weather in Paris is 18°C and cloudy."
+
+    def test_empty_tool_calls_list_unchanged(self, backend):
+        """Test that empty tool_calls list is handled."""
+        messages = [
+            {"role": "assistant", "content": "No tools needed.", "tool_calls": []}
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        # Empty list should remain as-is (no conversion needed)
+        assert result[0]["tool_calls"] == []
+
+    def test_original_messages_not_mutated(self, backend):
+        """Test that the original messages list is not modified."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "test", "arguments": '{"x": 1}'},
+                    }
+                ],
+            }
+        ]
+        # Make a deep copy for comparison
+        import copy
+
+        original = copy.deepcopy(messages)
+
+        backend._normalize_messages_for_ollama(messages)
+
+        # Original should be unchanged
+        assert messages == original
+
+    def test_missing_function_key_handled(self, backend):
+        """Test that missing function key in tool_calls is handled."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        # Missing "function" key
+                    }
+                ],
+            }
+        ]
+        result = backend._normalize_messages_for_ollama(messages)
+
+        # Should handle gracefully with empty function
+        assert result[0]["tool_calls"][0]["function"]["name"] == ""
+        assert result[0]["tool_calls"][0]["function"]["arguments"] == {}

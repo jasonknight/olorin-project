@@ -194,6 +194,9 @@ class VoiceActivityDetector:
         # - If we have detected real speech, require above silence threshold to continue
         if self._has_detected_real_speech:
             is_speech = is_above_silence_threshold
+            # Reset silence timer whenever we detect speech above silence threshold
+            if is_speech:
+                self._last_speech_time = current_time
         else:
             # Before first real speech, anything above silence threshold keeps us listening
             is_speech = is_above_silence_threshold

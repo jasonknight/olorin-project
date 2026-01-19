@@ -86,6 +86,7 @@ class BackendType(Enum):
 
     EXO = "exo"
     OLLAMA = "ollama"
+    ANTHROPIC = "anthropic"
 
 
 @dataclass
@@ -1090,8 +1091,17 @@ class OllamaBackend(InferenceBackend):
 
         Handles differences between OpenAI and Ollama message formats:
         - Converts content: None to content: "" for assistant messages
-        - Ensures tool messages have the correct format
+        - Converts tool_calls from OpenAI format to Ollama format
+        - Converts tool role messages from OpenAI format to Ollama format
+
+        OpenAI tool_calls format:
+            {"id": "call_123", "type": "function", "function": {"name": "...", "arguments": "{...}"}}
+
+        Ollama tool_calls format:
+            {"function": {"name": "...", "arguments": {...}}}  # arguments is object, not string
         """
+        import json as json_module
+
         normalized = []
         for msg in messages:
             msg_copy = msg.copy()
@@ -1099,6 +1109,34 @@ class OllamaBackend(InferenceBackend):
             # Ollama doesn't like content: None, use empty string instead
             if msg_copy.get("content") is None:
                 msg_copy["content"] = ""
+
+            # Convert tool_calls from OpenAI format to Ollama format
+            if "tool_calls" in msg_copy and msg_copy["tool_calls"]:
+                ollama_tool_calls = []
+                for tc in msg_copy["tool_calls"]:
+                    func = tc.get("function", {})
+                    # Parse arguments string to object if it's a string
+                    arguments = func.get("arguments", "{}")
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json_module.loads(arguments)
+                        except json_module.JSONDecodeError:
+                            arguments = {}
+
+                    ollama_tool_calls.append(
+                        {
+                            "function": {
+                                "name": func.get("name", ""),
+                                "arguments": arguments,
+                            }
+                        }
+                    )
+                msg_copy["tool_calls"] = ollama_tool_calls
+
+            # For tool role messages, Ollama doesn't use tool_call_id
+            if msg_copy.get("role") == "tool":
+                # Remove tool_call_id as Ollama doesn't use it
+                msg_copy.pop("tool_call_id", None)
 
             normalized.append(msg_copy)
         return normalized
@@ -1314,6 +1352,471 @@ class OllamaBackend(InferenceBackend):
                 )
 
 
+class AnthropicBackend(InferenceBackend):
+    """
+    Anthropic Claude API inference backend.
+
+    Uses the Anthropic SDK to provide inference via Claude models. Handles
+    Anthropic-specific API patterns including:
+    - System prompt as separate parameter
+    - Tool/function calling with Anthropic format
+    - Streaming via message stream context manager
+
+    API Reference: https://docs.anthropic.com/en/api/messages
+    """
+
+    # Known context windows for Claude models (in tokens)
+    _MODEL_CONTEXT_WINDOWS = {
+        "claude-3-opus": 200000,
+        "claude-3-sonnet": 200000,
+        "claude-3-haiku": 200000,
+        "claude-3-5-opus": 200000,
+        "claude-3-5-sonnet": 200000,
+        "claude-3-5-haiku": 200000,
+        "claude-sonnet-4": 200000,
+        "claude-opus-4": 200000,
+    }
+
+    def __init__(
+        self,
+        api_key: str,
+        default_model: str = "claude-sonnet-4-20250514",
+        default_temperature: float = 0.7,
+        default_max_tokens: int = 4096,
+    ):
+        """
+        Initialize the Anthropic backend.
+
+        Args:
+            api_key: Anthropic API key (from .env)
+            default_model: Default Claude model to use
+            default_temperature: Default temperature for completions
+            default_max_tokens: Default max tokens for completions
+        """
+        import anthropic
+
+        self._api_key = api_key
+        self._default_model = default_model
+        self._default_temperature = default_temperature
+        self._default_max_tokens = default_max_tokens
+
+        # Initialize Anthropic client
+        self._client = anthropic.Anthropic(api_key=api_key)
+
+        # Tool support cache
+        self._tools_supported: Optional[bool] = None
+        self._tools_model: Optional[str] = None
+
+        logger.info(f"AnthropicBackend initialized with model={self._default_model}")
+
+    @property
+    def backend_type(self) -> BackendType:
+        return BackendType.ANTHROPIC
+
+    @property
+    def client(self):
+        """Return the underlying Anthropic client for advanced use cases."""
+        return self._client
+
+    def get_running_model(self) -> Optional[str]:
+        """
+        Return the configured model.
+
+        Unlike Ollama/EXO, Anthropic doesn't have auto-detection - we always
+        return the configured model.
+
+        Returns:
+            The configured model name
+        """
+        return self._default_model
+
+    def check_health(self) -> bool:
+        """
+        Check Anthropic API health by making a minimal request.
+
+        Returns:
+            True if API is accessible, False otherwise
+        """
+        try:
+            # Use a minimal count_tokens request to check connectivity
+            self._client.messages.count_tokens(
+                model=self._default_model,
+                messages=[{"role": "user", "content": "test"}],
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Anthropic health check failed: {e}")
+            return False
+
+    def get_model_capabilities(
+        self, model: Optional[str] = None
+    ) -> Optional[ModelCapabilities]:
+        """
+        Get model capabilities for Anthropic models.
+
+        Uses known context windows for Claude models.
+
+        Returns:
+            ModelCapabilities with context window info
+        """
+        model_id = model or self._default_model
+        if not model_id:
+            return None
+
+        # Find context window from known models
+        context_length = 200000  # Default for Claude models
+        for model_prefix, ctx_len in self._MODEL_CONTEXT_WINDOWS.items():
+            if model_id.startswith(model_prefix):
+                context_length = ctx_len
+                break
+
+        return ModelCapabilities(
+            model_id=model_id,
+            context_length=context_length,
+            sliding_window=None,  # Claude uses full attention
+            rope_scaling_original_context=None,
+        )
+
+    def supports_tools(self, model: Optional[str] = None) -> bool:
+        """
+        Check if tool calling is supported.
+
+        All Claude 3+ models support tool calling.
+
+        Returns:
+            True (Claude models support tools)
+        """
+        return True
+
+    def _convert_messages_for_anthropic(
+        self, messages: list[dict]
+    ) -> tuple[Optional[str], list[dict]]:
+        """
+        Convert OpenAI-format messages to Anthropic format.
+
+        Extracts system message and converts tool-related messages.
+
+        Returns:
+            Tuple of (system_prompt, converted_messages)
+        """
+        import json as json_module
+
+        system_prompt = None
+        converted = []
+
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content")
+
+            if role == "system":
+                # Anthropic takes system as separate parameter
+                system_prompt = content
+                continue
+
+            if role == "assistant":
+                # Handle tool calls in assistant messages
+                if msg.get("tool_calls"):
+                    # Convert to Anthropic tool_use format
+                    content_blocks = []
+                    if content:
+                        content_blocks.append({"type": "text", "text": content})
+                    for tc in msg["tool_calls"]:
+                        func = tc.get("function", {})
+                        arguments = func.get("arguments", "{}")
+                        if isinstance(arguments, str):
+                            try:
+                                arguments = json_module.loads(arguments)
+                            except json_module.JSONDecodeError:
+                                arguments = {}
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": tc.get("id", ""),
+                                "name": func.get("name", ""),
+                                "input": arguments,
+                            }
+                        )
+                    converted.append({"role": "assistant", "content": content_blocks})
+                else:
+                    converted.append({"role": "assistant", "content": content or ""})
+
+            elif role == "tool":
+                # Convert tool response to Anthropic format
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.get("tool_call_id", ""),
+                                "content": content or "",
+                            }
+                        ],
+                    }
+                )
+
+            elif role == "user":
+                converted.append({"role": "user", "content": content or ""})
+
+        return system_prompt, converted
+
+    def _convert_tools_for_anthropic(self, tools: list[dict]) -> list[dict]:
+        """
+        Convert OpenAI-format tool definitions to Anthropic format.
+
+        OpenAI format:
+            {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+
+        Anthropic format:
+            {"name": "...", "description": "...", "input_schema": {...}}
+        """
+        converted = []
+        for tool in tools:
+            if tool.get("type") == "function":
+                func = tool.get("function", {})
+                converted.append(
+                    {
+                        "name": func.get("name", ""),
+                        "description": func.get("description", ""),
+                        "input_schema": func.get(
+                            "parameters", {"type": "object", "properties": {}}
+                        ),
+                    }
+                )
+        return converted
+
+    def _convert_tool_calls_to_openai_format(
+        self, tool_use_blocks: list[dict]
+    ) -> list[dict]:
+        """
+        Convert Anthropic tool_use blocks to OpenAI format.
+
+        Anthropic format:
+            {"type": "tool_use", "id": "...", "name": "...", "input": {...}}
+
+        OpenAI format:
+            {"id": "...", "type": "function", "function": {"name": "...", "arguments": "{...}"}}
+        """
+        import json as json_module
+
+        converted = []
+        for block in tool_use_blocks:
+            if block.get("type") == "tool_use":
+                converted.append(
+                    {
+                        "id": block.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json_module.dumps(block.get("input", {})),
+                        },
+                    }
+                )
+        return converted
+
+    def complete(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[list[dict]] = None,
+        timeout: Optional[float] = None,
+    ) -> CompletionResponse:
+        """Non-streaming completion via Anthropic API."""
+        model_to_use = model or self._default_model
+        if not model_to_use:
+            raise ValueError("No model available for inference")
+
+        # Convert messages
+        system_prompt, converted_messages = self._convert_messages_for_anthropic(
+            messages
+        )
+
+        # Build request parameters
+        params: dict[str, Any] = {
+            "model": model_to_use,
+            "messages": converted_messages,
+            "max_tokens": max_tokens
+            if max_tokens is not None
+            else self._default_max_tokens,
+        }
+
+        if system_prompt:
+            params["system"] = system_prompt
+
+        effective_temp = (
+            temperature if temperature is not None else self._default_temperature
+        )
+        if effective_temp is not None:
+            params["temperature"] = effective_temp
+
+        if tools:
+            params["tools"] = self._convert_tools_for_anthropic(tools)
+
+        if timeout is not None:
+            params["timeout"] = timeout
+
+        thread_name = threading.current_thread().name
+        logger.debug(
+            f"[{thread_name}] Anthropic complete request to model {model_to_use}"
+        )
+
+        response = self._client.messages.create(**params)
+
+        # Extract content and tool calls from response
+        content_text = ""
+        tool_calls = []
+
+        for block in response.content:
+            if block.type == "text":
+                content_text += block.text
+            elif block.type == "tool_use":
+                tool_calls.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+
+        # Convert tool calls to OpenAI format
+        openai_tool_calls = None
+        if tool_calls:
+            openai_tool_calls = self._convert_tool_calls_to_openai_format(tool_calls)
+
+        # Map stop_reason to finish_reason
+        finish_reason = response.stop_reason or "stop"
+        if finish_reason == "tool_use":
+            finish_reason = "tool_calls"
+        elif finish_reason == "end_turn":
+            finish_reason = "stop"
+
+        # Build usage dict
+        usage = None
+        if response.usage:
+            usage = {
+                "prompt_tokens": response.usage.input_tokens,
+                "completion_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens
+                + response.usage.output_tokens,
+            }
+
+        return CompletionResponse(
+            content=content_text,
+            finish_reason=finish_reason,
+            tool_calls=openai_tool_calls,
+            usage=usage,
+        )
+
+    def complete_stream(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[list[dict]] = None,
+        timeout: Optional[float] = None,
+    ) -> Iterator[CompletionChunk]:
+        """Streaming completion via Anthropic API."""
+        model_to_use = model or self._default_model
+        if not model_to_use:
+            raise ValueError("No model available for inference")
+
+        # Convert messages
+        system_prompt, converted_messages = self._convert_messages_for_anthropic(
+            messages
+        )
+
+        # Build request parameters
+        params: dict[str, Any] = {
+            "model": model_to_use,
+            "messages": converted_messages,
+            "max_tokens": max_tokens
+            if max_tokens is not None
+            else self._default_max_tokens,
+        }
+
+        if system_prompt:
+            params["system"] = system_prompt
+
+        effective_temp = (
+            temperature if temperature is not None else self._default_temperature
+        )
+        if effective_temp is not None:
+            params["temperature"] = effective_temp
+
+        if tools:
+            params["tools"] = self._convert_tools_for_anthropic(tools)
+
+        if timeout is not None:
+            params["timeout"] = timeout
+
+        thread_name = threading.current_thread().name
+        logger.debug(
+            f"[{thread_name}] Anthropic stream request to model {model_to_use}"
+        )
+
+        # Track accumulated tool calls
+        accumulated_tool_calls: list[dict] = []
+        current_tool_call: Optional[dict] = None
+
+        with self._client.messages.stream(**params) as stream:
+            for event in stream:
+                if event.type == "content_block_start":
+                    block = event.content_block
+                    if block.type == "tool_use":
+                        current_tool_call = {
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": "",
+                        }
+
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        yield CompletionChunk(
+                            content=delta.text,
+                            finish_reason=None,
+                            tool_calls=None,
+                        )
+                    elif delta.type == "input_json_delta" and current_tool_call:
+                        current_tool_call["input"] += delta.partial_json
+
+                elif event.type == "content_block_stop":
+                    if current_tool_call:
+                        # Parse accumulated JSON input
+                        import json as json_module
+
+                        try:
+                            current_tool_call["input"] = json_module.loads(
+                                current_tool_call["input"]
+                            )
+                        except json_module.JSONDecodeError:
+                            current_tool_call["input"] = {}
+                        accumulated_tool_calls.append(current_tool_call)
+                        current_tool_call = None
+
+                elif event.type == "message_stop":
+                    # Final chunk with tool calls if any
+                    finish_reason = "stop"
+                    openai_tool_calls = None
+
+                    if accumulated_tool_calls:
+                        finish_reason = "tool_calls"
+                        openai_tool_calls = self._convert_tool_calls_to_openai_format(
+                            accumulated_tool_calls
+                        )
+
+                    yield CompletionChunk(
+                        content="",
+                        finish_reason=finish_reason,
+                        tool_calls=openai_tool_calls,
+                    )
+
+
 @dataclass
 class InferenceClient:
     """
@@ -1378,6 +1881,24 @@ class InferenceClient:
                 default_temperature=self._config.get_float("OLLAMA_TEMPERATURE", 0.7)
                 or 0.7,
                 default_max_tokens=self._config.get_int("OLLAMA_MAX_TOKENS"),
+            )
+        elif backend_type == "anthropic":
+            # Get API key from .env (Config handles secret key sourcing)
+            api_key = self._config.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY not found. Please add it to your .env file: "
+                    "ANTHROPIC_API_KEY=sk-ant-..."
+                )
+            self._backend = AnthropicBackend(
+                api_key=api_key,
+                default_model=self._config.get(
+                    "ANTHROPIC_MODEL_NAME", "claude-sonnet-4-20250514"
+                ),
+                default_temperature=self._config.get_float("ANTHROPIC_TEMPERATURE", 0.7)
+                or 0.7,
+                default_max_tokens=self._config.get_int("ANTHROPIC_MAX_TOKENS", 4096)
+                or 4096,
             )
         else:
             raise ValueError(f"Unknown inference backend: {backend_type}")

@@ -1,3 +1,4 @@
 kafka-python==2.0.2
 python-dotenv==1.0.0
 TTS>=0.22.0
+pvorca>=1.0.0

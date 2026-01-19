@@ -28,7 +28,7 @@ The project follows a microservices architecture with independent components:
      v
   Cortex (AI Processing)
   - Consumes: prompts (Kafka topic)
-  - Service: Ollama/Exo (AI inference)
+  - Service: Ollama/Exo/Anthropic (AI inference)
   - Produces: ai_out (Kafka topic)
      |
      v
@@ -43,6 +43,8 @@ The project follows a microservices architecture with independent components:
 - **Kafka**: Message broker running on port 9092 (in Podman container)
 - **ChromaDB**: Vector database running on port 8000 (in Podman container)
 - **Exo**: Distributed AI inference server (OpenAI-compatible API)
+- **Ollama**: Local LLM inference server (OpenAI-compatible API)
+- **Anthropic**: Claude API inference (requires API key in `.env`)
 
 ## Common Commands
 
@@ -204,26 +206,48 @@ tail -f logs/hippocampus-pdf-tracker.log
 
 ### Cortex (AI Processing)
 
-**Purpose**: Bridges Kafka prompts to Exo AI inference service
+**Purpose**: Bridges Kafka prompts to AI inference backends (Exo, Ollama, or Anthropic)
 
 **Key Files**:
-- `consumer.py` - Consumes prompts, calls Exo API, produces responses
+- `consumer.py` - Consumes prompts, calls inference backend, produces responses
 - `producer.py` - Interactive REPL for sending prompts
 
-**Configuration** (in `settings.json` `cortex` and `exo` sections):
+**Configuration** (in `settings.json`):
+
+Core settings (`cortex` section):
 - `cortex.input_topic` - Input topic (default: prompts)
 - `cortex.output_topic` - Output topic (default: ai_out)
 - `cortex.consumer_group` - Consumer group (default: exo-consumer-group)
+
+Backend selection (`inference` section):
+- `inference.backend` - Backend to use: "exo", "ollama", or "anthropic" (default: ollama)
+
+Exo backend (`exo` section):
 - `exo.base_url` - Exo API endpoint (default: http://localhost:52415/v1)
 - `exo.model_name` - AI model name (auto-detect if null)
 - `exo.temperature` - Response randomness (0.0-2.0)
 - `exo.max_tokens` - Maximum response length
 
+Ollama backend (`ollama` section):
+- `ollama.base_url` - Ollama API endpoint (default: http://localhost:11434)
+- `ollama.model_name` - Model name (e.g., deepseek-r1:70b)
+- `ollama.temperature` - Response randomness (0.0-2.0)
+- `ollama.max_tokens` - Maximum response length
+
+Anthropic backend (`anthropic` section):
+- `anthropic.model_name` - Claude model (default: claude-sonnet-4-20250514)
+- `anthropic.temperature` - Response randomness (0.0-1.0)
+- `anthropic.max_tokens` - Maximum response length (default: 4096)
+- **API Key**: Set `ANTHROPIC_API_KEY=sk-ant-...` in `.env` file (never in settings.json)
+
 **Features**:
-- OpenAI-compatible API client
+- Multiple backend support (Exo, Ollama, Anthropic)
+- OpenAI-compatible API client for Exo/Ollama
+- Native Anthropic SDK for Claude models
 - Dynamic configuration reloading
 - Structured logging with rotation
 - Error messages sent to output topic
+- Tool/function calling support
 
 ### Hippocampus (Knowledge Base)
 
@@ -324,7 +348,10 @@ tail -f logs/hippocampus-pdf-tracker.log
 {
   "global": { "log_level": "INFO" },
   "kafka": { "bootstrap_servers": "localhost:9092" },
+  "inference": { "backend": "ollama" },
   "exo": { "base_url": "http://localhost:52415/v1", "temperature": 0.7 },
+  "ollama": { "base_url": "http://localhost:11434", "model_name": "deepseek-r1:70b", "temperature": 0.7 },
+  "anthropic": { "model_name": "claude-sonnet-4-20250514", "temperature": 0.7, "max_tokens": 4096 },
   "broca": { "kafka_topic": "ai_out", "tts": { "model_name": "...", "speaker": "p272" } },
   "cortex": { "input_topic": "prompts", "output_topic": "ai_out" },
   "hippocampus": { "input_dir": "~/Documents/AI_IN", "chromadb": { "host": "localhost", "port": 8000 } },
@@ -374,6 +401,19 @@ let patterns = config.get_list("CHAT_RESET_PATTERNS", None);
 **Backward Compatibility**: Flat keys like `CHROMADB_PORT` are automatically mapped to nested JSON paths like `hippocampus.chromadb.port`. Existing code using flat keys continues to work without changes.
 
 **Hot-Reload**: Consumer components (broca, cortex, enrichener) detect changes to `settings.json` and automatically reload configuration without restarting.
+
+**Secret Keys**: Sensitive values like API keys are stored in `.env` file (never in `settings.json`). The Config library handles secret keys specially - they are only read from `.env` or environment variables, never from `settings.json`. Currently defined secret keys:
+- `ANTHROPIC_API_KEY` - Anthropic Claude API key
+
+Example `.env` file:
+```
+ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+Components access secret keys the same way as regular config:
+```python
+api_key = config.get("ANTHROPIC_API_KEY")  # Config sources from .env automatically
+```
 
 ### State Management
 
@@ -654,6 +694,8 @@ The project uses pytest with fixtures. Test structure:
 **Kafka connection errors**: Ensure Kafka container is running (`podman ps`)
 **ChromaDB connection errors**: Check ChromaDB container is running on port 8000
 **Exo connection errors**: Start Exo before running Cortex consumer
+**Ollama connection errors**: Ensure Ollama is running (`ollama serve`)
+**Anthropic API key errors**: Add `ANTHROPIC_API_KEY=sk-ant-...` to `.env` file
 **Timestamp errors in Kafka**: The producers use broker-assigned timestamps to avoid clock skew
 
 ### RAG Context Injection
