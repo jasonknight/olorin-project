@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # consumer.py
 from kafka import KafkaConsumer, KafkaProducer
+import hashlib
 import json
 import os
 import sys
@@ -917,25 +918,48 @@ When you decide to use a tool, call it with the required parameters. After the t
             history = self.chat_store.get_conversation_messages(conversation_id)
             logger.info(f"[{thread_name}] Retrieved {len(history)} historical messages")
 
-            # Extract context IDs already injected in this conversation
-            # This prevents re-injecting manual context that's already in history
-            already_injected_ids = set()
-            for msg in history:
-                if msg.get("message_type") == "context_user":
-                    metadata = msg.get("metadata", {})
-                    if isinstance(metadata, dict):
-                        ctx_ids = metadata.get("context_ids", [])
-                        if ctx_ids:
-                            already_injected_ids.update(ctx_ids)
-
+            # Get context IDs already injected in this conversation from tracking table
+            # This is the authoritative source for deduplication
+            already_injected_ids = self.chat_store.get_conversation_context_ids(
+                conversation_id
+            )
             if already_injected_ids:
                 logger.info(
-                    f"[{thread_name}] Found {len(already_injected_ids)} already-injected context IDs"
+                    f"[{thread_name}] Found {len(already_injected_ids)} already-injected context IDs from tracking table"
                 )
 
-            # Add historical messages
+            # Add historical messages, but handle context_with_prompt specially
+            # For context_with_prompt messages, use the original_prompt from metadata
+            # to avoid duplicating context that's already in those messages
             for msg in history:
-                messages.append({"role": msg["role"], "content": msg["content"]})
+                message_type = msg.get("message_type", "message")
+                if message_type == "context_with_prompt":
+                    # Extract original prompt from metadata to avoid context duplication
+                    metadata = msg.get("metadata", {})
+                    if isinstance(metadata, dict) and metadata.get("original_prompt"):
+                        messages.append(
+                            {
+                                "role": msg["role"],
+                                "content": metadata["original_prompt"],
+                            }
+                        )
+                        logger.debug(
+                            f"[{thread_name}] Using original_prompt from context_with_prompt message"
+                        )
+                    else:
+                        # Fallback: use full content if original_prompt not available
+                        messages.append(
+                            {"role": msg["role"], "content": msg["content"]}
+                        )
+                        logger.warning(
+                            f"[{thread_name}] No original_prompt in metadata, using full content"
+                        )
+                elif message_type in ("context_user", "context_ack"):
+                    # Skip old-style context messages (they were re-injected at query time)
+                    continue
+                else:
+                    # Regular message - include as-is
+                    messages.append({"role": msg["role"], "content": msg["content"]})
 
             # Filter context_chunks to only include NEW context (not already in history)
             new_context_chunks = None
@@ -991,6 +1015,25 @@ When you decide to use a tool, call it with the required parameters. After the t
                     logger.info(
                         f"[{thread_name}] Stored combined context+prompt in chat history"
                     )
+
+                    # Track injected context IDs in the tracking table for deduplication
+                    # This prevents the same context from being injected in future messages
+                    contexts_to_track = []
+                    for ctx in new_context_chunks:
+                        ctx_id = ctx.get("id")
+                        content = ctx.get("content", "")
+                        if ctx_id:
+                            content_hash = hashlib.sha256(
+                                content.encode("utf-8")
+                            ).hexdigest()
+                            contexts_to_track.append((ctx_id, content_hash))
+                    if contexts_to_track:
+                        tracked_count = self.chat_store.add_conversation_contexts_batch(
+                            conversation_id, contexts_to_track
+                        )
+                        logger.info(
+                            f"[{thread_name}] Tracked {tracked_count} new context IDs for deduplication"
+                        )
                 except Exception as e:
                     logger.warning(
                         f"[{thread_name}] Failed to store message in chat history: {e}"

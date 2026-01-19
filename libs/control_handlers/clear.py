@@ -50,23 +50,33 @@ def handle(payload: Dict[str, Any]) -> Dict[str, Any]:
     conversations_deleted = 0
     messages_deleted = 0
     contexts_deleted = 0
+    context_tracking_deleted = 0
 
-    # Clear chat database
+    # Clear chat database (includes conversation_contexts tracking table)
     if chat_db_path and os.path.exists(chat_db_path):
         chat_store = ChatStore(str(chat_db_path))
-        conversations_deleted, messages_deleted = chat_store.clear_all()
+        conversations_deleted, messages_deleted, context_tracking_deleted = (
+            chat_store.clear_all()
+        )
 
-    # Clear context database
+    # Clear context database (RAG context chunks from enrichener)
     if context_db_path and os.path.exists(context_db_path):
         context_store = ContextStore(str(context_db_path))
         contexts_deleted = context_store.clear_all()
 
-    total_deleted = conversations_deleted + messages_deleted + contexts_deleted
+    total_deleted = (
+        conversations_deleted
+        + messages_deleted
+        + contexts_deleted
+        + context_tracking_deleted
+    )
 
     return {
         "conversations_deleted": conversations_deleted,
         "messages_deleted": messages_deleted,
         "contexts_deleted": contexts_deleted,
+        "context_tracking_deleted": context_tracking_deleted,
         "message": f"Cleared {total_deleted} records ({conversations_deleted} conversations, "
-        f"{messages_deleted} messages, {contexts_deleted} contexts)",
+        f"{messages_deleted} messages, {contexts_deleted} contexts, "
+        f"{context_tracking_deleted} context tracking records)",
     }

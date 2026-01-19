@@ -109,7 +109,7 @@
   "ollama": {
     "base_url": "http://localhost:11434",
     "max_tokens": null,
-    "model_name": "dolphin-llama3:8b-256k",
+    "model_name": "mistral-nemo:12b",
     "temperature": 0.7
   },
   "state": {

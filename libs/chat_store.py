@@ -109,6 +109,31 @@ class ChatStore:
             ON messages(message_type)
         """)
 
+        # Conversation contexts table - tracks which context chunks have been
+        # injected into each conversation to prevent duplicate injection
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_contexts (
+                conversation_id TEXT NOT NULL,
+                context_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (conversation_id, context_id),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+            )
+        """)
+
+        # Index for looking up contexts by conversation
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversation_contexts_conversation_id
+            ON conversation_contexts(conversation_id)
+        """)
+
+        # Index for looking up by content hash (for deduplication by content)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversation_contexts_content_hash
+            ON conversation_contexts(content_hash)
+        """)
+
         conn.commit()
         logger.debug("Database schema initialized")
 
@@ -197,10 +222,28 @@ class ChatStore:
         """
         Close the current active conversation and create a new one.
 
+        Also clears the context tracking for the old conversation(s) to ensure
+        fresh context injection in the new conversation.
+
         Returns:
             new conversation_id (UUID string)
         """
         conn = self._get_connection()
+
+        # Get active conversation IDs before closing them (for context cleanup)
+        cursor = conn.execute("SELECT id FROM conversations WHERE is_active = 1")
+        active_ids = [row["id"] for row in cursor.fetchall()]
+
+        # Clear context tracking for active conversations
+        if active_ids:
+            placeholders = ",".join("?" * len(active_ids))
+            conn.execute(
+                f"DELETE FROM conversation_contexts WHERE conversation_id IN ({placeholders})",
+                active_ids,
+            )
+            logger.info(
+                f"Cleared context tracking for {len(active_ids)} conversation(s)"
+            )
 
         # Mark all active conversations as inactive
         conn.execute("UPDATE conversations SET is_active = 0 WHERE is_active = 1")
@@ -210,6 +253,154 @@ class ChatStore:
 
         # Create and return new conversation
         return self.get_or_create_active_conversation()
+
+    # =========================================================================
+    # Context Tracking (for deduplication)
+    # =========================================================================
+
+    def add_conversation_context(
+        self,
+        conversation_id: str,
+        context_id: str,
+        content_hash: str,
+    ) -> bool:
+        """
+        Track that a context chunk has been injected into a conversation.
+
+        This prevents the same context from being injected multiple times
+        in the same conversation.
+
+        Args:
+            conversation_id: ID of the conversation
+            context_id: Unique ID of the context chunk
+            content_hash: SHA-256 hash of the context content
+
+        Returns:
+            True if tracked (new context), False if already tracked
+        """
+        conn = self._get_connection()
+        now = datetime.now().isoformat()
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO conversation_contexts (conversation_id, context_id, content_hash, added_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (conversation_id, context_id, content_hash, now),
+            )
+            conn.commit()
+            logger.debug(
+                f"Tracked context {context_id[:8]}... in conversation {conversation_id[:8]}..."
+            )
+            return True
+        except sqlite3.IntegrityError:
+            # Already tracked (primary key constraint)
+            logger.debug(
+                f"Context {context_id[:8]}... already tracked in conversation {conversation_id[:8]}..."
+            )
+            return False
+
+    def add_conversation_contexts_batch(
+        self,
+        conversation_id: str,
+        contexts: list[tuple[str, str]],
+    ) -> int:
+        """
+        Track multiple context chunks in a single transaction.
+
+        Args:
+            conversation_id: ID of the conversation
+            contexts: List of (context_id, content_hash) tuples
+
+        Returns:
+            Number of new contexts tracked (excludes duplicates)
+        """
+        if not contexts:
+            return 0
+
+        conn = self._get_connection()
+        now = datetime.now().isoformat()
+        added_count = 0
+
+        for context_id, content_hash in contexts:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO conversation_contexts (conversation_id, context_id, content_hash, added_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (conversation_id, context_id, content_hash, now),
+                )
+                added_count += 1
+            except sqlite3.IntegrityError:
+                # Already tracked, skip
+                pass
+
+        conn.commit()
+        logger.debug(
+            f"Tracked {added_count}/{len(contexts)} contexts in conversation {conversation_id[:8]}..."
+        )
+        return added_count
+
+    def get_conversation_context_ids(self, conversation_id: str) -> set[str]:
+        """
+        Get all context IDs that have been injected into a conversation.
+
+        Args:
+            conversation_id: ID of the conversation
+
+        Returns:
+            Set of context IDs
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT context_id FROM conversation_contexts WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        return {row["context_id"] for row in cursor.fetchall()}
+
+    def get_conversation_context_hashes(self, conversation_id: str) -> set[str]:
+        """
+        Get all content hashes that have been injected into a conversation.
+
+        This allows deduplication by content even if context IDs differ.
+
+        Args:
+            conversation_id: ID of the conversation
+
+        Returns:
+            Set of content hashes
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT content_hash FROM conversation_contexts WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        return {row["content_hash"] for row in cursor.fetchall()}
+
+    def clear_conversation_contexts(self, conversation_id: str) -> int:
+        """
+        Clear all tracked contexts for a conversation.
+
+        Args:
+            conversation_id: ID of the conversation
+
+        Returns:
+            Number of context records deleted
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "DELETE FROM conversation_contexts WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        conn.commit()
+        deleted = cursor.rowcount
+        if deleted > 0:
+            logger.info(
+                f"Cleared {deleted} tracked contexts from conversation {conversation_id[:8]}..."
+            )
+        return deleted
 
     # =========================================================================
     # Message Management
@@ -585,16 +776,20 @@ class ChatStore:
             cursor = conn.execute("SELECT COUNT(*) as count FROM messages")
         return cursor.fetchone()["count"]
 
-    def clear_all(self) -> Tuple[int, int]:
+    def clear_all(self) -> Tuple[int, int, int]:
         """
-        Clear all conversations and messages from the database.
+        Clear all conversations, messages, and context tracking from the database.
 
         Returns:
-            Tuple of (conversations_deleted, messages_deleted)
+            Tuple of (conversations_deleted, messages_deleted, contexts_deleted)
         """
         conn = self._get_connection()
 
-        # Delete messages first (FK constraint)
+        # Delete context tracking first (FK constraint)
+        cursor = conn.execute("DELETE FROM conversation_contexts")
+        contexts_deleted = cursor.rowcount
+
+        # Delete messages (FK constraint)
         cursor = conn.execute("DELETE FROM messages")
         messages_deleted = cursor.rowcount
 
@@ -605,13 +800,16 @@ class ChatStore:
         conn.commit()
 
         logger.info(
-            f"Cleared {conversations_deleted} conversations and {messages_deleted} messages"
+            f"Cleared {conversations_deleted} conversations, {messages_deleted} messages, "
+            f"and {contexts_deleted} tracked contexts"
         )
-        return conversations_deleted, messages_deleted
+        return conversations_deleted, messages_deleted, contexts_deleted
 
     def delete_old_conversations(self, older_than_days: int = 30) -> int:
         """
         Delete inactive conversations older than specified days.
+
+        Also deletes associated messages and context tracking.
 
         Args:
             older_than_days: Delete conversations older than this many days
@@ -624,6 +822,17 @@ class ChatStore:
         cutoff = (datetime.now() - timedelta(days=older_than_days)).isoformat()
 
         conn = self._get_connection()
+
+        # Delete context tracking from old inactive conversations
+        conn.execute(
+            """
+            DELETE FROM conversation_contexts WHERE conversation_id IN (
+                SELECT id FROM conversations
+                WHERE last_message_at < ? AND is_active = 0
+            )
+            """,
+            (cutoff,),
+        )
 
         # Delete messages from old inactive conversations
         conn.execute(

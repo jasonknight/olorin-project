@@ -280,6 +280,17 @@ class TemporalConsumer:
 
     def _process_wake_word_mode(self, audio_chunk: np.ndarray):
         """Process audio in wake word detection mode."""
+        # Always buffer audio during wake word detection so we don't lose
+        # any speech that occurs immediately after the wake word
+        buffer_samples = int(self.config.wake_buffer_seconds * self.config.sample_rate)
+        self._audio_buffer.append(audio_chunk)
+
+        # Keep only the last N seconds (rolling buffer)
+        total_samples = sum(len(chunk) for chunk in self._audio_buffer)
+        while total_samples > buffer_samples and len(self._audio_buffer) > 1:
+            removed = self._audio_buffer.pop(0)
+            total_samples -= len(removed)
+
         if self.wake_word_detector is not None:
             # Use Porcupine for wake word detection
             detected = self.wake_word_detector.process_audio(audio_chunk)
@@ -293,14 +304,8 @@ class TemporalConsumer:
 
     def _process_wake_word_whisper(self, audio_chunk: np.ndarray):
         """Process audio using Whisper-based wake word detection (fallback)."""
-        buffer_samples = int(self.config.wake_buffer_seconds * self.config.sample_rate)
-        self._audio_buffer.append(audio_chunk)
-
+        # Audio is already buffered in _process_wake_word_mode
         total_samples = sum(len(chunk) for chunk in self._audio_buffer)
-        while total_samples > buffer_samples and len(self._audio_buffer) > 1:
-            removed = self._audio_buffer.pop(0)
-            total_samples -= len(removed)
-
         if total_samples < self.config.sample_rate:
             return
 
@@ -322,7 +327,9 @@ class TemporalConsumer:
             self._send_feedback(self.config.feedback_message)
 
         self._listening_mode = "transcribing"
-        self._audio_buffer.clear()
+        # Don't clear audio buffer - keep the buffered audio so we don't lose
+        # any speech that occurred immediately after the wake word.
+        # The wake phrase itself will be stripped in _finalize_transcription().
         self._transcription_buffer.clear()
         # Reset VAD and assume speech is happening - this ensures silence timeout
         # will trigger even if the user pauses right after the wake word

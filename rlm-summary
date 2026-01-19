@@ -1,0 +1,422 @@
+# Recursive Language Models (RLMs) - Summary and Implementation Plan
+
+## Paper Summary (arxiv:2512.24601v1)
+
+### Core Concept
+
+RLMs treat long prompts as **environment objects** rather than feeding them directly into neural networks. Instead of stuffing 200K tokens into a context window, the system:
+
+1. Loads the prompt as a variable in a Python REPL environment
+2. Gives the root LLM only **metadata** about the content (length, structure)
+3. The model writes **code to probe, filter, and partition** the input
+4. Sub-LLM calls handle smaller chunks, with results stored in variables
+5. Iteration continues until a `FINAL()` or `FINAL_VAR()` marker is produced
+
+### Key Mechanics
+
+**Workflow:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│  User prompt (arbitrarily long) → Stored as `context` var   │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Root LLM receives: "context is 500K chars, find answer X"  │
+│  Root LLM outputs: code to inspect/partition context        │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  REPL executes code, e.g.:                                  │
+│    chunks = partition(context, 5000)                        │
+│    results = [sub_lm(chunk, "summarize") for chunk in ...]  │
+│    final_answer = aggregate(results)                        │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  Model outputs: FINAL(answer) → System returns to user      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Special Markers:**
+- `FINAL(answer)` - Return this string as the final answer
+- `FINAL_VAR(varname)` - Return the contents of this variable as the final answer
+- These markers are "brittle" without explicit training
+
+**Sub-LLM Calls:**
+- Root and sub-LLMs can be different models (e.g., GPT-5 root → GPT-5-mini subs)
+- Current max recursion depth is 1 (sub-calls are LMs, not RLMs)
+- All sub-calls execute sequentially (no async parallelism)
+- Sandboxed Python REPL for code execution
+
+### Key Results
+
+- Handles inputs **2 orders of magnitude beyond context windows**
+- On OOLONG-Pairs benchmark: GPT-5 RLM achieved 58% F1 vs 0.04% for base GPT-5
+- Performance degrades more gracefully as complexity increases
+- Median costs remain comparable to base models (but high variance)
+
+### Requirements/Limitations
+
+1. **Strong coding capabilities** - Models without them underperform significantly
+2. **Training helps** - While not required, explicit RLM training improves performance
+3. **Runtime variance** - High variance due to different decomposition trajectories
+4. **Answer verification overhead** - Can create redundant expensive operations
+
+---
+
+## Current Olorin Architecture Analysis
+
+### Cortex Consumer Flow (cortex/consumer.py)
+
+```
+Kafka(prompts) → Parse message → Build messages with history →
+  Check context fit → Call inference API → Stream response →
+  Handle tool calls → Send to Broca → Store in chat history
+```
+
+**Key Components:**
+- `ExoConsumer` class handles all inference
+- `InferenceClient` abstracts Ollama/Exo backends via OpenAI-compatible API
+- `ModelCapabilities` detects context limits, sliding window attention
+- `ToolClient` handles existing tool server protocol (separate from RLM)
+- Chat history via `ChatStore`
+- RAG context via `ContextStore`
+
+### Model Capability Detection (libs/inference.py)
+
+Current capability detection:
+```python
+@dataclass
+class ModelCapabilities:
+    model_id: str
+    context_length: int
+    sliding_window: Optional[int]  # Critical for RLM feasibility
+
+    @property
+    def effective_context(self) -> int:
+        """Returns sliding_window if set, else context_length"""
+```
+
+The system already queries Ollama's `/api/show` endpoint to detect:
+- Context window size
+- Sliding window attention (problematic for RAG, also for RLM)
+- RoPE scaling parameters
+
+---
+
+## Challenges for RLM Implementation
+
+### 1. Determining Model Compatibility
+
+**Critical Question:** Can a given model handle recursive contexts?
+
+**Required Capabilities:**
+- **Strong code generation** - Must write correct Python for partitioning/aggregation
+- **Tool/function calling support** - Needed for structured `sub_lm()` calls
+- **Consistent instruction following** - Must produce `FINAL()` markers correctly
+- **No sliding window attention** - Would break awareness of earlier recursive context
+
+**Proposed Detection Strategy:**
+```python
+@dataclass
+class RLMCapabilities:
+    model_id: str
+    supports_rlm: bool
+    code_generation_score: float  # From capability probe
+    tool_calling: bool            # From existing detection
+    has_sliding_window: bool      # Disqualifying factor
+    confidence: float
+    detected_at: datetime
+
+    # Detection methods:
+    # 1. Model family heuristics (deepseek-coder, codellama → likely good)
+    # 2. Capability probe - generate simple partitioning code, evaluate
+    # 3. Blacklist known-bad models (pure chat models without code training)
+```
+
+**Challenges:**
+- No standard way to query "code generation ability" from model metadata
+- Capability varies significantly between quantizations of same model
+- User might switch models mid-conversation
+
+### 2. Python REPL Sandboxing
+
+RLM requires executing model-generated code. This is a **major security concern**.
+
+**Options:**
+1. **RestrictedPython** - Limit available builtins/imports
+2. **Subprocess sandbox** - Run in isolated process with timeouts
+3. **Container isolation** - Podman container per execution
+4. **Pyodide/WASM** - Browser-like sandbox (complex integration)
+
+**Recommended:** Start with subprocess + RestrictedPython, upgrade to container if needed.
+
+### 3. Sub-LLM Call Protocol
+
+Need a way for the REPL to call back into the inference system:
+
+```python
+# In the sandboxed REPL environment:
+def sub_lm(prompt: str, context: str = None, model: str = None) -> str:
+    """Call a sub-LM with the given prompt."""
+    # Must communicate back to Cortex for actual inference
+    pass
+```
+
+**Options:**
+1. **HTTP callback** - REPL calls Cortex endpoint
+2. **Queue-based** - REPL posts to special Kafka topic, waits for response
+3. **In-process** - Use multiprocessing.Queue (simpler but less isolated)
+
+### 4. State Management Across Recursion
+
+Each recursive call needs:
+- Access to accumulated variables (`results`, `chunks`, etc.)
+- Conversation context for sub-LMs
+- Ability to store intermediate results
+
+**Proposal:** Extend `state.py` with scoped session state:
+```python
+state.set_json(f"rlm.session.{session_id}.vars", {...})
+state.set_json(f"rlm.session.{session_id}.call_stack", [...])
+```
+
+### 5. Cost/Timeout Management
+
+RLM can spiral into many sub-calls. Need:
+- Max recursion depth limit
+- Total token budget
+- Timeout per sub-call and total session
+- Graceful degradation when limits hit
+
+---
+
+## Implementation Plan
+
+### Phase 1: Model Compatibility Detection
+
+**Add to `libs/inference.py`:**
+
+```python
+@dataclass
+class RLMCapabilities:
+    """Recursive LLM capability assessment."""
+    model_id: str
+    code_generation: bool     # Can generate valid Python
+    tool_calling: bool        # Supports function/tool calls
+    has_sliding_window: bool  # Disqualifying factor
+    supported: bool           # Final determination
+    confidence: str           # "high", "medium", "low"
+    reason: str               # Human-readable explanation
+
+def check_rlm_capabilities(model: str = None) -> RLMCapabilities:
+    """
+    Assess whether a model can handle RLM workloads.
+
+    Checks:
+    1. Model family heuristics (coder models → likely supported)
+    2. Sliding window attention (disqualifying)
+    3. Tool calling support (required)
+    4. Optional: Capability probe (generate simple code)
+    """
+```
+
+**Model Family Heuristics:**
+- Known good: `deepseek-coder`, `codellama`, `qwen-coder`, `starcoder`
+- Known bad: Pure chat models without code training
+- Unknown: Default to "medium" confidence, suggest probe
+
+### Phase 2: RLM Configuration
+
+**Add to `settings.json`:**
+
+```json
+{
+  "rlm": {
+    "enabled": false,                    // Master switch
+    "auto_detect_model": true,           // Check model capabilities first
+    "max_recursion_depth": 3,            // Limit nested sub_lm calls
+    "max_total_tokens": 100000,          // Budget across all calls
+    "sub_call_timeout": 60,              // Seconds per sub_lm call
+    "total_timeout": 300,                // Seconds for entire RLM session
+    "sandbox": {
+      "type": "subprocess",              // "subprocess", "container"
+      "allowed_imports": ["re", "json", "collections"],
+      "max_memory_mb": 256,
+      "max_cpu_seconds": 30
+    },
+    "sub_lm": {
+      "model": null,                     // null = same as root, or specify smaller model
+      "temperature": 0.3                 // Lower for more deterministic decomposition
+    }
+  }
+}
+```
+
+### Phase 3: RLM Executor Component
+
+**New file: `libs/rlm_executor.py`:**
+
+```python
+class RLMExecutor:
+    """
+    Executes Recursive LLM sessions.
+
+    Manages:
+    - Python REPL sandbox
+    - Variable storage (context chunks, intermediate results)
+    - Sub-LM call routing
+    - FINAL() marker detection
+    - Resource limits enforcement
+    """
+
+    def __init__(self, inference_client, config):
+        self.inference = inference_client
+        self.config = config
+        self.session_vars = {}
+        self.call_count = 0
+        self.total_tokens = 0
+
+    def execute(self, context: str, question: str) -> str:
+        """
+        Run an RLM session to answer question using context.
+
+        1. Store context as session variable
+        2. Prime root LLM with metadata and instructions
+        3. Loop: execute code → detect markers/sub_lm calls → continue
+        4. Return when FINAL() detected or limits hit
+        """
+
+    def _run_sandbox(self, code: str) -> dict:
+        """Execute code in sandbox, return variables/output."""
+
+    def _handle_sub_lm_call(self, prompt: str, context: str = None) -> str:
+        """Route sub_lm() call to inference backend."""
+```
+
+### Phase 4: Integration with Cortex Consumer
+
+**Modify `cortex/consumer.py`:**
+
+```python
+class ExoConsumer:
+    def __init__(self, config):
+        # ... existing init ...
+
+        # RLM executor (lazy init)
+        self._rlm_executor = None
+        self._rlm_capable = None  # Cached capability check
+
+    def _should_use_rlm(self, context_size: int) -> bool:
+        """
+        Determine if RLM should be used for this request.
+
+        Factors:
+        - RLM enabled in config
+        - Model supports RLM (code gen, no sliding window)
+        - Context exceeds threshold (e.g., >50% of context window)
+        """
+
+    def process_message(self, message):
+        # ... existing parsing ...
+
+        # Determine if RLM is appropriate
+        if self.config.rlm_enabled and context_chunks:
+            context_size = sum(len(c["content"]) for c in context_chunks)
+
+            if self._should_use_rlm(context_size):
+                logger.info("Using RLM mode for large context")
+                return self._process_with_rlm(prompt, context_chunks, message_id)
+
+        # ... existing non-RLM flow ...
+```
+
+### Phase 5: RLM Prompt Engineering
+
+**System prompt for RLM root model:**
+
+```
+You are a Recursive Language Model assistant. You have access to a Python REPL
+and can examine large contexts by writing code.
+
+Available functions:
+- sub_lm(prompt, context=None) → str: Call a sub-LM with a prompt
+- len(var) → int: Get length of variable
+- partition(text, chunk_size) → list: Split text into chunks
+
+Variables available:
+- context: The full context document ({context_len} characters)
+- question: The user's question
+
+Your task: Answer the question using the context. Write Python code to
+decompose and analyze the context. When you have the answer, output:
+FINAL(your answer here)
+
+Example workflow:
+```python
+# First, understand the structure
+print(f"Context length: {len(context)}")
+print(context[:500])  # Sample the beginning
+
+# Partition into manageable chunks
+chunks = partition(context, 4000)
+print(f"Split into {len(chunks)} chunks")
+
+# Search each chunk for relevant info
+results = []
+for i, chunk in enumerate(chunks):
+    summary = sub_lm(f"Does this text mention X? If yes, quote relevant parts:\n{chunk}")
+    if "yes" in summary.lower():
+        results.append(summary)
+
+# Aggregate findings
+if results:
+    final = sub_lm(f"Synthesize these findings to answer: {question}\n\nFindings:\n" + "\n".join(results))
+    FINAL(final)
+else:
+    FINAL("The context does not contain information about this topic.")
+```
+```
+
+---
+
+## Configuration Options Summary
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `rlm.enabled` | bool | false | Enable RLM for large contexts |
+| `rlm.auto_detect_model` | bool | true | Check model capabilities before using RLM |
+| `rlm.context_threshold` | float | 0.5 | Use RLM when context >50% of window |
+| `rlm.max_recursion_depth` | int | 3 | Max nested sub_lm calls |
+| `rlm.max_total_tokens` | int | 100000 | Token budget for session |
+| `rlm.sub_call_timeout` | int | 60 | Seconds per sub_lm call |
+| `rlm.total_timeout` | int | 300 | Seconds for entire session |
+| `rlm.sandbox.type` | str | "subprocess" | Sandbox implementation |
+| `rlm.sub_lm.model` | str | null | Model for sub-calls (null=same) |
+
+---
+
+## Open Questions
+
+1. **Training data** - Should we fine-tune a local model for RLM, or rely on foundation model capabilities?
+
+2. **Caching** - Should sub_lm results be cached to avoid redundant calls for identical prompts?
+
+3. **Parallel sub-calls** - The paper notes sequential execution. Should we add async parallel execution for independent sub-calls?
+
+4. **User visibility** - How do we show RLM progress to user? (Decomposition steps, sub-call progress, etc.)
+
+5. **Fallback** - What happens when RLM fails mid-session? Fall back to truncated direct context?
+
+---
+
+## Recommended First Steps
+
+1. **Implement `RLMCapabilities` detection** in `libs/inference.py`
+2. **Add model family heuristics** for common models (deepseek-coder, codellama, etc.)
+3. **Create proof-of-concept** executor with subprocess sandbox
+4. **Test with known-good model** (deepseek-coder-v2 or qwen-coder)
+5. **Measure performance** vs direct long-context with same model
+6. **Add configuration** and integration points in cortex
+
+This is a significant addition that adds code execution to the system, so security review of the sandbox implementation is critical before production use.

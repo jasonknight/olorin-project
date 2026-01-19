@@ -72,6 +72,12 @@ from openai import OpenAI
 
 from libs.config import Config
 
+# Import capabilities module (lazy to avoid circular imports)
+# Full import happens in methods that need it
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from libs.capabilities import ModelCapabilities as FullModelCapabilities
+
 logger = logging.getLogger(__name__)
 
 
@@ -1431,6 +1437,10 @@ class InferenceClient:
         """
         Get context window and attention capabilities for a model.
 
+        Note: This returns the legacy ModelCapabilities dataclass with only
+        context-related fields. For comprehensive capabilities including
+        code generation and tool support, use get_capabilities() instead.
+
         Args:
             model: Model to query (uses default if None)
 
@@ -1440,6 +1450,51 @@ class InferenceClient:
         if self._backend is None:
             return None
         return self._backend.get_model_capabilities(model)
+
+    def get_capabilities(
+        self,
+        model: Optional[str] = None,
+        force_refresh: bool = False,
+        probe_tools: bool = True,
+        probe_code: bool = False,
+    ) -> "FullModelCapabilities":
+        """
+        Get comprehensive capabilities for a model.
+
+        This is the preferred method for capability detection, returning
+        a full ModelCapabilities object from libs.capabilities that includes:
+        - Context window and sliding window detection
+        - Tool/function calling support
+        - Code generation ability (heuristic + optional probe)
+        - RLM (Recursive LLM) compatibility assessment
+
+        Args:
+            model: Model to query (uses running model if None)
+            force_refresh: Bypass cache and re-detect all capabilities
+            probe_tools: Whether to probe tool support (makes API call)
+            probe_code: Whether to probe code generation (makes API call, slow)
+
+        Returns:
+            ModelCapabilities with comprehensive capability information
+
+        Example:
+            caps = inference_client.get_capabilities("deepseek-coder:6.7b")
+            if caps.supports_rlm:
+                # Model can handle recursive LLM patterns
+                pass
+            if caps.strong_code:
+                # Model has strong code generation
+                pass
+        """
+        from libs.capabilities import get_capabilities_detector
+
+        detector = get_capabilities_detector(self)
+        return detector.detect(
+            model=model,
+            force_refresh=force_refresh,
+            probe_tools=probe_tools,
+            probe_code=probe_code,
+        )
 
     def validate_context(
         self, messages: list[dict], model: Optional[str] = None

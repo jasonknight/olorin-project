@@ -255,10 +255,11 @@ class TestStatistics:
         chat_store.add_user_message(conv_id, "Test")
         chat_store.add_assistant_message(conv_id, "Response")
 
-        convs_deleted, msgs_deleted = chat_store.clear_all()
+        convs_deleted, msgs_deleted, contexts_deleted = chat_store.clear_all()
 
         assert convs_deleted == 1
         assert msgs_deleted == 2
+        assert contexts_deleted == 0  # No contexts tracked in this test
         assert chat_store.get_conversation_count() == 0
         assert chat_store.get_message_count() == 0
 

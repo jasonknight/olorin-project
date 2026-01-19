@@ -555,7 +555,11 @@ class TestClearHandler:
 
         # Mock ChatStore
         mock_chat_store = MagicMock()
-        mock_chat_store.clear_all.return_value = (3, 10)  # 3 convs, 10 messages
+        mock_chat_store.clear_all.return_value = (
+            3,
+            10,
+            5,
+        )  # 3 convs, 10 messages, 5 context tracking
         mocker.patch(
             "libs.control_handlers.clear.ChatStore", return_value=mock_chat_store
         )
@@ -582,7 +586,8 @@ class TestClearHandler:
         assert result["conversations_deleted"] == 3
         assert result["messages_deleted"] == 10
         assert result["contexts_deleted"] == 25
-        assert "38 records" in result["message"]  # 3 + 10 + 25 = 38
+        assert result["context_tracking_deleted"] == 5
+        assert "43 records" in result["message"]  # 3 + 10 + 25 + 5 = 43
 
     def test_handles_missing_chat_db(self, mocker, tmp_path):
         """Test handler when chat database doesn't exist."""
@@ -632,7 +637,11 @@ class TestClearHandler:
 
         # Mock ChatStore
         mock_chat_store = MagicMock()
-        mock_chat_store.clear_all.return_value = (2, 8)
+        mock_chat_store.clear_all.return_value = (
+            2,
+            8,
+            3,
+        )  # 2 convs, 8 msgs, 3 ctx tracking
         mocker.patch(
             "libs.control_handlers.clear.ChatStore", return_value=mock_chat_store
         )
