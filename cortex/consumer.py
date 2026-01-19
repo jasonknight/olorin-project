@@ -627,46 +627,58 @@ class ExoConsumer:
             max_delay = 20.0
             growth_factor = 1.2  # 20% increase
 
-            # Send first notice immediately
-            notice_count += 1
-            processing_message = {
-                "text": "Processing, one moment...",
-                "id": f"{message_id}_processing_{notice_count}",
-                "prompt_id": message_id,
-                "is_processing_notice": True,
-                "timestamp": datetime.now().isoformat(),
-            }
-            logger.info(f"[{thread_name}] 📣 Sending processing notice #{notice_count}")
-            self.producer.send(self.config.kafka_output_topic, value=processing_message)
-
-            # Continue sending notices with increasing delays until cancelled
-            while not cancel_event.is_set():
-                # Wait for the delay, but check for cancellation
-                if cancel_event.wait(timeout=delay):
-                    # Event was set, stop sending notices
-                    logger.info(
-                        f"[{thread_name}] ✓ Processing notices cancelled after {notice_count} notice(s)"
-                    )
-                    return
-
-                # Send another notice
+            try:
+                # Send first notice immediately
                 notice_count += 1
                 processing_message = {
-                    "text": "Processing, please wait...",
+                    "text": "Processing, one moment...",
                     "id": f"{message_id}_processing_{notice_count}",
                     "prompt_id": message_id,
                     "is_processing_notice": True,
                     "timestamp": datetime.now().isoformat(),
                 }
                 logger.info(
-                    f"[{thread_name}] 📣 Sending processing notice #{notice_count} (next in {min(delay * growth_factor, max_delay):.1f}s)"
+                    f"[{thread_name}] 📣 Sending processing notice #{notice_count}"
                 )
                 self.producer.send(
                     self.config.kafka_output_topic, value=processing_message
                 )
+                self.producer.flush()  # Ensure immediate delivery
 
-                # Increase delay for next time, capped at max
-                delay = min(delay * growth_factor, max_delay)
+                # Continue sending notices with increasing delays until cancelled
+                while not cancel_event.is_set():
+                    # Wait for the delay, but check for cancellation
+                    if cancel_event.wait(timeout=delay):
+                        # Event was set, stop sending notices
+                        logger.info(
+                            f"[{thread_name}] ✓ Processing notices cancelled after {notice_count} notice(s)"
+                        )
+                        return
+
+                    # Send another notice
+                    notice_count += 1
+                    processing_message = {
+                        "text": "Processing, please wait...",
+                        "id": f"{message_id}_processing_{notice_count}",
+                        "prompt_id": message_id,
+                        "is_processing_notice": True,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    logger.info(
+                        f"[{thread_name}] 📣 Sending processing notice #{notice_count} (next in {min(delay * growth_factor, max_delay):.1f}s)"
+                    )
+                    self.producer.send(
+                        self.config.kafka_output_topic, value=processing_message
+                    )
+                    self.producer.flush()  # Ensure immediate delivery
+
+                    # Increase delay for next time, capped at max
+                    delay = min(delay * growth_factor, max_delay)
+            except Exception as e:
+                logger.error(
+                    f"[{thread_name}] ✗ Processing notice thread error: {e}",
+                    exc_info=True,
+                )
 
         thread = threading.Thread(
             target=notice_sender, name=f"{thread_name}-notice-sender", daemon=True

@@ -4,32 +4,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Olorin-project is a distributed AI pipeline system composed of three main brain-inspired components communicating via Kafka. The system creates a complete text-to-speech AI pipeline with document retrieval capabilities.
+Olorin-project is a distributed AI pipeline system composed of brain-inspired components communicating via Kafka. The system creates a complete voice-to-voice AI pipeline with document retrieval capabilities.
 
 ## System Architecture
 
-The project follows a microservices architecture with three independent components:
+The project follows a microservices architecture with independent components:
 
 ```
-[User Input]
+[Voice Input]                              [Document Input]
+     |                                           |
+     v                                           v
+  Temporal (Speech-to-Text)              Hippocampus (Knowledge Base)
+  - Listens for: "Hey Olorin"              - Monitors: ~/Documents/AI_IN
+  - Service: Faster-Whisper                - Service: ChromaDB
+  - Produces: ai_in (Kafka topic)          - Purpose: Document ingestion
+     |                                           |
+     v                                           |
+  Enrichener (RAG)  <----------------------------+
+  - Consumes: ai_in (Kafka topic)          (semantic search)
+  - Adds context from ChromaDB
+  - Produces: prompts (Kafka topic)
      |
      v
   Cortex (AI Processing)
   - Consumes: prompts (Kafka topic)
+  - Service: Ollama/Exo (AI inference)
   - Produces: ai_out (Kafka topic)
-  - Service: Exo (distributed AI inference)
      |
      v
   Broca (Text-to-Speech)
   - Consumes: ai_out (Kafka topic)
   - Service: Coqui TTS
   - Output: Audio playback
-     |
-     v
-Hippocampus (Knowledge Base)
-  - Monitors: ~/Documents/AI_IN directory
-  - Service: ChromaDB (vector database)
-  - Purpose: Document ingestion, semantic search
 ```
 
 ### Infrastructure Components
@@ -130,6 +136,19 @@ python3 status.py             # Check database status
 pytest                        # Run all tests
 pytest --cov                  # Run with coverage
 pytest tests/test_markdown_chunker.py  # Run specific test
+```
+
+#### Temporal (Voice Input)
+```bash
+cd temporal
+source venv/bin/activate
+python3 consumer.py           # Start voice-activated STT consumer
+
+# The consumer listens for "hey olorin" wake phrase
+# After wake word detection, it transcribes speech until:
+# - 3 seconds of silence (configurable)
+# - "that's all" or other stop phrase
+# Transcribed text is sent to ai_in topic
 ```
 
 ### Container Management
@@ -252,12 +271,49 @@ tail -f logs/hippocampus-pdf-tracker.log
 - `./data/office_tracking.db` - SQLite database tracking processed Office documents
 - `./data/` - ChromaDB persistent storage (mounted in container)
 
+### Temporal (Voice Input)
+
+**Purpose**: Voice-activated speech-to-text with wake word detection
+
+**Key Files**:
+- `consumer.py` - Main voice listener daemon
+- `audio_capture.py` - Microphone audio capture using sounddevice
+- `stt_engine.py` - Faster-Whisper speech-to-text engine
+- `vad.py` - Silero VAD for voice activity detection
+
+**Configuration** (in `settings.json` `temporal` section):
+- `output_topic` - Output Kafka topic (default: ai_in)
+- `feedback_topic` - Feedback topic for Broca (default: ai_out)
+- `feedback_message` - Message sent on wake word (default: "Yes?")
+- `audio.sample_rate` - Audio sample rate (default: 16000)
+- `audio.device` - Audio input device (default: null for system default)
+- `wake_word.phrase` - Wake phrase (default: "hey olorin")
+- `wake_word.buffer_seconds` - Audio buffer for detection (default: 3.0)
+- `stt.model` - Whisper model size (default: small)
+- `stt.device` - Compute device (default: cpu)
+- `stt.language` - Language code (default: en)
+- `silence.timeout_seconds` - Silence timeout (default: 3.0)
+- `silence.stop_phrases` - Phrases that end recording (default: ["that's all", ...])
+- `behavior.pause_during_tts` - Pause listening during Broca playback (default: true)
+
+**Features**:
+- Wake word detection using Whisper streaming
+- Voice activity detection with Silero VAD
+- Configurable silence timeout
+- Stop phrase detection ("that's all")
+- Integration with Broca for feedback ("Yes?")
+- Automatic pause during TTS playback to avoid echo
+
+**Data Storage**:
+- `./temporal/data/models/` - Downloaded Whisper models
+
 ## Architecture Patterns
 
 ### Message Flow
 
-1. **Prompt Pipeline**: User → prompts topic → Cortex → Exo API → ai_out topic → Broca → Audio
-2. **Document Pipeline**: File → ~/Documents/AI_IN → Hippocampus → ChromaDB
+1. **Voice Pipeline**: Mic → Temporal (wake word) → ai_in topic → Enrichener (RAG) → prompts topic → Cortex → ai_out topic → Broca → Audio
+2. **Text Prompt Pipeline**: User → prompts topic → Cortex → Exo API → ai_out topic → Broca → Audio
+3. **Document Pipeline**: File → ~/Documents/AI_IN → Hippocampus → ChromaDB
 
 ### Configuration Management
 
@@ -638,6 +694,7 @@ user: [question]
 ## Project Naming
 
 Components are named after brain regions:
+- **Temporal lobe**: Auditory processing and speech comprehension (STT)
 - **Cortex**: Higher-level processing (AI inference)
 - **Broca's area**: Speech production (TTS)
 - **Hippocampus**: Memory formation and retrieval (document storage)

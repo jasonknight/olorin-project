@@ -109,11 +109,55 @@
   "ollama": {
     "base_url": "http://localhost:11434",
     "max_tokens": null,
-    "model_name": "deepseek-r1:70b",
+    "model_name": "dolphin-llama3:8b-256k",
     "temperature": 0.7
   },
   "state": {
     "db_path": "./data/state.db"
+  },
+  "temporal": {
+    "audio": {
+      "channels": 1,
+      "chunk_duration": 0.5,
+      "device": null,
+      "sample_rate": 16000
+    },
+    "behavior": {
+      "pause_during_tts": true
+    },
+    "completion_message": "Transcription complete.",
+    "enabled": true,
+    "feedback_message": null,
+    "feedback_topic": "ai_out",
+    "output_topic": "ai_in",
+    "porcupine": {
+      "access_key": "H7IauigF7dKSHFcCiltMzra0EZW2TsPUIK/HnjUTXCJSeirS3Xxhag==",
+      "keyword_path": "/Users/olorin/Downloads/Hey-Computer_en_mac_v4_0_0/Hey-Computer_en_mac_v4_0_0.ppn",
+      "sensitivity": 0.5
+    },
+    "silence": {
+      "stop_phrases": [
+        "that's all",
+        "thats all",
+        "that is all",
+        "end message"
+      ],
+      "timeout_seconds": 3.0,
+      "vad_threshold": 0.5
+    },
+    "stt": {
+      "compute_type": "int8",
+      "device": "cpu",
+      "engine": "leopard",
+      "language": "en",
+      "leopard_punctuation": true,
+      "model": "small",
+      "model_dir": "./temporal/data/models"
+    },
+    "wake_word": {
+      "buffer_seconds": 3.0,
+      "phrase": "hey computer"
+    }
   },
   "tools": {
     "embeddings": {

@@ -466,6 +466,7 @@ DAEMONS="
 cortex-consumer|cortex|consumer.py
 cortex-controller|cortex|controller.py
 broca-consumer|broca|consumer.py
+temporal-consumer|temporal|consumer.py
 hippocampus-pdf-tracker|hippocampus|pdf_tracker.py
 hippocampus-ebook-tracker|hippocampus|ebook_tracker.py
 hippocampus-txt-tracker|hippocampus|txt_tracker.py
