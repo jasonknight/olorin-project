@@ -1,15 +1,26 @@
+```
+ ██████╗ ██╗      ██████╗ ██████╗ ██╗███╗   ██╗
+██╔═══██╗██║     ██╔═══██╗██╔══██╗██║████╗  ██║
+██║   ██║██║     ██║   ██║██████╔╝██║██╔██╗ ██║
+██║   ██║██║     ██║   ██║██╔══██╗██║██║╚██╗██║
+╚██████╔╝███████╗╚██████╔╝██║  ██║██║██║ ╚████║
+ ╚═════╝ ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝
+```
+
 # Olorin
 
 **Your AI-powered Second Brain with a Voice**
 
 Olorin is a personal AI assistant designed to be your Chief of Staff—always listening, always ready to help, with instant access to your documents and knowledge. Talk to it naturally, and it talks back.
 
-## What Olorin Does
+> **Note: This project is in active development.** Some features described below are partially implemented or experimental. The architecture is stable, but expect rough edges. Contributions and feedback welcome.
 
-- **Voice In, Voice Out** — Say "Hey Olorin" and speak naturally. Get spoken responses back.
+## Vision
+
+- **Voice In, Voice Out** — Speak naturally using a wake phrase. Get spoken responses back.
 - **Knows Your Documents** — Drop files into a folder. Olorin reads, indexes, and recalls them when relevant.
 - **Multiple AI Backends** — Use Claude, Ollama (local), or distributed inference. Your choice.
-- **Takes Action** — The AI can write files, search your knowledge base, and execute tasks autonomously.
+- **Takes Action** — The AI can write files, search your knowledge base, and execute tasks.
 - **Remembers Everything** — Full conversation history with context tracking across sessions.
 
 ## Quick Start
@@ -24,13 +35,13 @@ python3 setup.py
 # Launch the chat interface
 cd tools/chat && cargo run --release
 
-# Or just talk — say "Hey Olorin"
+# Or use voice — say your wake phrase (e.g., "Hey Computer")
 ```
 
 ## The Experience
 
 ```
-You: "Hey Olorin"
+You: "Hey Computer"
 Olorin: "Yes?"
 
 You: "What were the key points from that product roadmap I saved last week?"
@@ -40,9 +51,23 @@ You: "Write up a summary and save it for me"
 Olorin: [creates markdown file in ~/Documents/AI_OUT]
 ```
 
-### Voice Interface
+## Voice Interface
 
-The voice pipeline listens continuously for the wake phrase. After activation:
+### Wake Word Detection
+
+Olorin uses **Picovoice Porcupine** for always-on wake word detection. This runs locally on your device with minimal CPU usage.
+
+**Setup Required:** You need to create your own wake word model:
+1. Go to [Picovoice Console](https://console.picovoice.ai/)
+2. Create a free account and generate a custom wake word (e.g., "Hey Computer", "Hey Assistant")
+3. Download the `.ppn` model file for macOS
+4. Configure the path in `settings.json` under `temporal.porcupine.model_path`
+
+The default configuration expects a wake phrase like "Hey Computer". You can customize this to any phrase Picovoice supports.
+
+### Voice Pipeline
+
+After wake word activation:
 - Speak naturally until you pause (~3 seconds) or say "that's all"
 - Olorin retrieves relevant context from your knowledge base automatically
 - Response plays back through your speakers
@@ -56,15 +81,33 @@ A terminal-based interface (`tools/chat`) provides:
 - System state monitoring (audio status, model info)
 - Slash commands for control
 
-### Document Ingestion
+## Document Ingestion
 
 Drop files into `~/Documents/AI_IN`. Olorin handles:
-- **Markdown** — Native support
+- **Markdown** — Native support with semantic chunking
 - **PDF** — Extracts text, converts to searchable chunks
 - **Ebooks** — EPUB, MOBI
 - **Office** — Word docs, ODT, plain text
 
 Documents are chunked semantically and stored in a vector database for instant retrieval.
+
+## Advanced Features
+
+### Recursive Language Model (RLM)
+
+For models with strong code generation capabilities, Olorin implements the **Recursive Language Model** pattern (based on [arxiv:2512.24601](https://arxiv.org/abs/2512.24601)). This allows handling contexts that exceed the model's native context window by:
+
+1. Treating long documents as environment objects rather than stuffing them into context
+2. The model writes Python code to probe, filter, and partition the input
+3. Sub-LLM calls handle smaller chunks, with results stored in variables
+4. Iteration continues until a final answer is synthesized
+
+This enables answering questions over documents that would be impossible to fit in a single context window. RLM is automatically enabled when:
+- The model supports code generation (detected automatically)
+- The context exceeds 50% of the model's context window
+- RLM is enabled in configuration (`rlm.enabled: true`)
+
+**Note:** RLM requires models with strong coding capabilities (e.g., DeepSeek-Coder, CodeLlama, Qwen-Coder). It will not activate for chat-only models.
 
 ## Slash Commands
 
@@ -85,9 +128,11 @@ All settings live in `settings.json`. Key options:
 | `inference.backend` | Choose: `ollama`, `anthropic`, or `exo` |
 | `ollama.model_name` | Local model (e.g., `deepseek-r1:70b`) |
 | `anthropic.model_name` | Claude model (e.g., `claude-sonnet-4-20250514`) |
-| `temporal.wake_word.phrase` | Wake phrase (default: "hey olorin") |
+| `temporal.porcupine.model_path` | Path to your Picovoice wake word model |
+| `temporal.porcupine.access_key` | Your Picovoice access key |
 | `broca.tts.speaker` | Voice selection |
 | `hippocampus.input_dir` | Document watch folder |
+| `rlm.enabled` | Enable Recursive Language Model for large contexts |
 
 For Anthropic, add your API key to `.env`:
 ```
@@ -110,7 +155,7 @@ Voice ──► Temporal (STT) ──► Enrichener (RAG) ──► Cortex (AI) 
 
 | Component | Role |
 |-----------|------|
-| **Temporal** | Listens for wake word, transcribes speech |
+| **Temporal** | Listens for wake word (Picovoice), transcribes speech (Whisper) |
 | **Enrichener** | Decides if context is needed, retrieves relevant documents |
 | **Cortex** | Sends prompts to AI, handles tool calls, manages conversation |
 | **Broca** | Converts responses to speech, plays audio |
@@ -152,8 +197,8 @@ olorin-project/
 ├── settings.json          # Configuration
 ├── .env                   # API keys (not committed)
 │
-├── temporal/              # Voice input (STT)
-├── cortex/                # AI inference + tools
+├── temporal/              # Voice input (STT + wake word)
+├── cortex/                # AI inference + tools + RLM
 ├── broca/                 # Voice output (TTS)
 ├── hippocampus/           # Document processing
 │   └── enrichener.py      # Context retrieval
@@ -167,6 +212,7 @@ olorin-project/
 ├── libs/                  # Shared libraries
 │   ├── config.py          # Configuration management
 │   ├── state.py           # Runtime state
+│   ├── rlm_executor.py    # Recursive Language Model
 │   ├── chat_store.py      # Conversation history
 │   └── context_store.py   # Retrieved documents
 │
@@ -196,6 +242,10 @@ olorin-project/
 - Anthropic API key
 - Exo (distributed)
 
+**Voice (optional but recommended):**
+- Picovoice account and access key (free tier available)
+- Custom wake word model (.ppn file)
+
 **Optional:**
 - Pandoc (Office document conversion)
 - FFmpeg (audio processing)
@@ -206,10 +256,12 @@ Run `python3 setup.py` to check all dependencies.
 
 | Issue | Solution |
 |-------|----------|
-| No response after wake word | Check `logs/temporal-consumer.log` for STT errors |
+| No response after wake word | Check `logs/temporal-consumer.log`, verify Picovoice model path |
+| Wake word not detected | Ensure `.ppn` file exists and access key is valid |
 | Context not being retrieved | Verify documents are in `~/Documents/AI_IN` and indexed |
 | Audio not playing | Run `/audio-status`, check Broca logs |
 | AI not responding | Verify backend is running (Ollama/Exo/API key) |
+| RLM not activating | Check model supports code generation, verify `rlm.enabled: true` |
 
 ## Why "Olorin"?
 
