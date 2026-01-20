@@ -61,6 +61,11 @@ class BrocaConfig:
         self.orca_voice = self.cfg.get("ORCA_VOICE", None)
         self.orca_model_path = self.cfg.get_path("ORCA_MODEL_PATH", None)
 
+        # Kokoro TTS settings
+        self.kokoro_voice = self.cfg.get("KOKORO_VOICE", "af_bella")
+        self.kokoro_lang_code = self.cfg.get("KOKORO_LANG_CODE", "a")
+        self.kokoro_speed = self.cfg.get_float("KOKORO_SPEED", 1.0)
+
     def reload(self) -> bool:
         """Check for config changes and reload if needed"""
         if self.cfg.reload():
@@ -122,6 +127,9 @@ class TTSConsumer:
             orca_access_key=config.orca_access_key,
             orca_voice=config.orca_voice,
             orca_model_path=config.orca_model_path,
+            kokoro_voice=config.kokoro_voice,
+            kokoro_lang_code=config.kokoro_lang_code,
+            kokoro_speed=config.kokoro_speed,
         )
 
         logger.info(f"TTS engine '{config.tts_engine}' initialized successfully")
@@ -168,6 +176,9 @@ class TTSConsumer:
         old_orca_access_key = self.config.orca_access_key
         old_orca_voice = self.config.orca_voice
         old_orca_model_path = self.config.orca_model_path
+        old_kokoro_voice = self.config.kokoro_voice
+        old_kokoro_lang_code = self.config.kokoro_lang_code
+        old_kokoro_speed = self.config.kokoro_speed
         old_output_dir = self.config.output_dir
 
         if self.config.reload():
@@ -184,12 +195,19 @@ class TTSConsumer:
                 or self.config.orca_voice != old_orca_voice
                 or self.config.orca_model_path != old_orca_model_path
             )
+            kokoro_changed = (
+                self.config.kokoro_voice != old_kokoro_voice
+                or self.config.kokoro_lang_code != old_kokoro_lang_code
+                or self.config.kokoro_speed != old_kokoro_speed
+            )
 
             # Reinitialize if engine changed or current engine's settings changed
             should_reinit = engine_changed
             if self.config.tts_engine == "coqui" and coqui_changed:
                 should_reinit = True
             if self.config.tts_engine == "orca" and orca_changed:
+                should_reinit = True
+            if self.config.tts_engine == "kokoro" and kokoro_changed:
                 should_reinit = True
 
             if should_reinit:

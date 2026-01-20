@@ -56,6 +56,9 @@ class TemporalConfig:
         self.feedback_message = self.cfg.get("TEMPORAL_FEEDBACK_MESSAGE", None)
         self.completion_message = self.cfg.get("TEMPORAL_COMPLETION_MESSAGE", None)
 
+        # Wake word engine selection: "porcupine", "openwakeword", or "whisper"
+        self.wake_word_engine = self.cfg.get("TEMPORAL_WAKE_WORD_ENGINE", "porcupine")
+
         # Porcupine wake word detection (uses shared Picovoice access key from .env)
         self.porcupine_access_key = self.cfg.get("PICOVOICE_ACCESS_KEY", None)
         self.porcupine_keyword_path = self.cfg.get_path(
@@ -65,9 +68,25 @@ class TemporalConfig:
             "TEMPORAL_PORCUPINE_SENSITIVITY", 0.5
         )
         self.use_porcupine = (
-            self.porcupine_access_key is not None
+            self.wake_word_engine == "porcupine"
+            and self.porcupine_access_key is not None
             and self.porcupine_keyword_path is not None
         )
+
+        # OpenWakeWord settings
+        self.openwakeword_model_path = self.cfg.get_path(
+            "TEMPORAL_OPENWAKEWORD_MODEL_PATH", None
+        )
+        self.openwakeword_verifier_path = self.cfg.get_path(
+            "TEMPORAL_OPENWAKEWORD_VERIFIER_PATH", None
+        )
+        self.openwakeword_threshold = self.cfg.get_float(
+            "TEMPORAL_OPENWAKEWORD_THRESHOLD", 0.5
+        )
+        self.openwakeword_verifier_threshold = self.cfg.get_float(
+            "TEMPORAL_OPENWAKEWORD_VERIFIER_THRESHOLD", 0.3
+        )
+        self.use_openwakeword = self.wake_word_engine == "openwakeword"
 
         # STT engine selection: "leopard" or "whisper"
         self.stt_engine = self.cfg.get("TEMPORAL_STT_ENGINE", "whisper")
@@ -210,9 +229,36 @@ class TemporalConsumer:
         )
 
     def _init_wake_word(self):
-        """Initialize wake word detector (Porcupine or fallback to Whisper)."""
+        """Initialize wake word detector (Porcupine, OpenWakeWord, or Whisper fallback)."""
         self.wake_word_detector = None
 
+        # Try OpenWakeWord first if configured
+        if self.config.use_openwakeword:
+            try:
+                from openwakeword_detector import OpenWakeWordDetector
+
+                self.wake_word_detector = OpenWakeWordDetector(
+                    model_path=self.config.openwakeword_model_path,
+                    verifier_path=self.config.openwakeword_verifier_path,
+                    threshold=self.config.openwakeword_threshold,
+                    verifier_threshold=self.config.openwakeword_verifier_threshold,
+                )
+                self.logger.info(
+                    f"OpenWakeWord detector initialized: "
+                    f"model={self.config.openwakeword_model_path}, "
+                    f"threshold={self.config.openwakeword_threshold}"
+                )
+                return
+            except ImportError:
+                self.logger.error(
+                    "OpenWakeWord not installed. Run: pip install openwakeword"
+                )
+                self.logger.warning("Falling back to Whisper-based wake word detection")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize OpenWakeWord: {e}")
+                self.logger.warning("Falling back to Whisper-based wake word detection")
+
+        # Try Porcupine if configured
         if self.config.use_porcupine:
             try:
                 self.wake_word_detector = WakeWordDetector(
@@ -225,16 +271,17 @@ class TemporalConsumer:
                     f"model={self.config.porcupine_keyword_path}, "
                     f"sensitivity={self.config.porcupine_sensitivity}"
                 )
+                return
             except Exception as e:
                 self.logger.error(f"Failed to initialize Porcupine: {e}")
                 self.logger.warning("Falling back to Whisper-based wake word detection")
-                self.wake_word_detector = None
-        else:
-            self.logger.info(
-                "Porcupine not configured, using Whisper-based wake word detection. "
-                "Set PICOVOICE_ACCESS_KEY in .env and temporal.porcupine.keyword_path "
-                "in settings.json to use Porcupine."
-            )
+
+        # No dedicated wake word detector - will use Whisper fallback
+        self.logger.info(
+            f"Using Whisper-based wake word detection for '{self.config.wake_phrase}'. "
+            "Configure temporal.wake_word.engine in settings.json to use "
+            "'openwakeword' or 'porcupine' for better performance."
+        )
 
     def _should_pause(self) -> bool:
         """Check if we should pause listening (e.g., during TTS playback)."""

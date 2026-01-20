@@ -89,6 +89,102 @@ class CoquiTTSEngine(TTSEngine):
         pass
 
 
+class KokoroTTSEngine(TTSEngine):
+    """TTS engine using Kokoro (hexgrad/Kokoro-82M)."""
+
+    # Language code mapping
+    LANG_CODES = {
+        "american": "a",
+        "british": "b",
+        "spanish": "e",
+        "french": "f",
+        "hindi": "h",
+        "italian": "i",
+        "japanese": "j",
+        "portuguese": "p",
+        "chinese": "z",
+    }
+
+    # Sample voices by language/gender
+    AVAILABLE_VOICES = [
+        "af_bella",
+        "af_heart",
+        "af_nicole",
+        "af_sarah",
+        "af_sky",
+        "am_adam",
+        "am_michael",
+        "bf_emma",
+        "bf_isabella",
+        "bm_george",
+        "bm_lewis",
+    ]
+
+    def __init__(
+        self,
+        voice: Optional[str] = "af_bella",
+        lang_code: Optional[str] = "a",
+        speed: float = 1.0,
+    ):
+        """
+        Initialize Kokoro TTS engine.
+
+        Args:
+            voice: Voice name (e.g., "af_bella", "af_heart", "am_adam").
+                   Prefix indicates language (a=American, b=British) and
+                   gender (f=female, m=male).
+            lang_code: Language code for phoneme conversion:
+                      'a' (American), 'b' (British), 'e' (Spanish),
+                      'f' (French), 'h' (Hindi), 'i' (Italian),
+                      'j' (Japanese), 'p' (Portuguese), 'z' (Chinese)
+            speed: Speech speed multiplier (default 1.0)
+        """
+        from kokoro import KPipeline
+
+        self.voice = voice or "af_bella"
+        self.lang_code = lang_code or "a"
+        self.speed = speed
+        self._sample_rate = 24000  # Kokoro outputs at 24kHz
+
+        logger.info(
+            f"Initializing Kokoro TTS with voice={self.voice}, lang={self.lang_code}"
+        )
+        self._pipeline = KPipeline(lang_code=self.lang_code)
+        logger.info("Kokoro TTS initialized successfully")
+
+    def synthesize(self, text: str, output_path: str) -> None:
+        """Synthesize speech using Kokoro."""
+        import soundfile as sf
+        import numpy as np
+
+        # Generate audio using the pipeline
+        audio_segments = []
+        for _gs, _ps, audio in self._pipeline(
+            text, voice=self.voice, speed=self.speed, split_pattern=r"\n+"
+        ):
+            if audio is not None:
+                audio_segments.append(audio)
+
+        if not audio_segments:
+            raise ValueError("Kokoro produced no audio output")
+
+        # Concatenate all segments
+        full_audio = np.concatenate(audio_segments)
+
+        # Write to file
+        sf.write(output_path, full_audio, self._sample_rate)
+        logger.debug(f"Synthesized {len(full_audio)} samples to {output_path}")
+
+    def get_available_speakers(self) -> list[str]:
+        """Get available Kokoro voices."""
+        return self.AVAILABLE_VOICES.copy()
+
+    def cleanup(self) -> None:
+        """Cleanup Kokoro resources."""
+        # Kokoro doesn't require explicit cleanup
+        self._pipeline = None
+
+
 class OrcaTTSEngine(TTSEngine):
     """TTS engine using Picovoice Orca."""
 
@@ -305,17 +401,24 @@ def create_tts_engine(
     orca_access_key: Optional[str] = None,
     orca_voice: Optional[str] = None,
     orca_model_path: Optional[str] = None,
+    # Kokoro options
+    kokoro_voice: Optional[str] = None,
+    kokoro_lang_code: Optional[str] = None,
+    kokoro_speed: float = 1.0,
 ) -> TTSEngine:
     """
     Factory function to create TTS engine based on configuration.
 
     Args:
-        engine: Engine type - "coqui" or "orca"
+        engine: Engine type - "coqui", "orca", or "kokoro"
         coqui_model_name: Coqui TTS model name
         coqui_speaker: Coqui speaker ID
         orca_access_key: Picovoice access key for Orca
         orca_voice: Orca voice model (e.g., "en_female", "en_male")
         orca_model_path: Optional path to custom Orca .pv model file
+        kokoro_voice: Kokoro voice (e.g., "af_bella", "af_heart", "am_adam")
+        kokoro_lang_code: Kokoro language code ('a'=American, 'b'=British, etc.)
+        kokoro_speed: Kokoro speech speed multiplier (default 1.0)
 
     Returns:
         Configured TTSEngine instance
@@ -339,5 +442,14 @@ def create_tts_engine(
             model_path=orca_model_path,
         )
 
+    elif engine == "kokoro":
+        return KokoroTTSEngine(
+            voice=kokoro_voice,
+            lang_code=kokoro_lang_code,
+            speed=kokoro_speed,
+        )
+
     else:
-        raise ValueError(f"Unknown TTS engine: {engine}. Supported: coqui, orca")
+        raise ValueError(
+            f"Unknown TTS engine: {engine}. Supported: coqui, orca, kokoro"
+        )

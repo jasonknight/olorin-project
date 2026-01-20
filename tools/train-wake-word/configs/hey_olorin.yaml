@@ -1,0 +1,8 @@
+model_name: hey_olorin
+n_samples: 2000
+n_samples_val: 500
+steps: 10000
+target_accuracy: 0.7
+target_phrase:
+- hey olorin
+target_recall: 0.5

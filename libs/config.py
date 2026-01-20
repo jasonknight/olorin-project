@@ -46,6 +46,10 @@ _KEY_TO_PATH = {
     "ORCA_ACCESS_KEY": "broca.orca.access_key",
     "ORCA_VOICE": "broca.orca.voice",
     "ORCA_MODEL_PATH": "broca.orca.model_path",
+    # Broca Kokoro TTS
+    "KOKORO_VOICE": "broca.kokoro.voice",
+    "KOKORO_LANG_CODE": "broca.kokoro.lang_code",
+    "KOKORO_SPEED": "broca.kokoro.speed",
     # Cortex
     "CORTEX_INPUT_TOPIC": "cortex.input_topic",
     "CORTEX_OUTPUT_TOPIC": "cortex.output_topic",
@@ -173,6 +177,13 @@ _KEY_TO_PATH = {
     # Temporal STT engine selection
     "TEMPORAL_STT_ENGINE": "temporal.stt.engine",
     "TEMPORAL_LEOPARD_PUNCTUATION": "temporal.stt.leopard_punctuation",
+    # Temporal wake word engine selection
+    "TEMPORAL_WAKE_WORD_ENGINE": "temporal.wake_word.engine",
+    # Temporal OpenWakeWord settings
+    "TEMPORAL_OPENWAKEWORD_MODEL_PATH": "temporal.openwakeword.model_path",
+    "TEMPORAL_OPENWAKEWORD_VERIFIER_PATH": "temporal.openwakeword.verifier_path",
+    "TEMPORAL_OPENWAKEWORD_THRESHOLD": "temporal.openwakeword.threshold",
+    "TEMPORAL_OPENWAKEWORD_VERIFIER_THRESHOLD": "temporal.openwakeword.verifier_threshold",
 }
 
 

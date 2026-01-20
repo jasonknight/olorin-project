@@ -18,6 +18,13 @@
     "auto_offset_reset": "earliest",
     "consumer_group": "tts-consumer-group",
     "kafka_topic": "ai_out",
+    "kokoro": {
+      "_voice_options": "af_bella, af_heart, af_nicole, af_sarah, af_sky, am_adam, am_michael, bf_emma, bf_isabella, bm_george, bm_lewis",
+      "_lang_code_options": "a (American), b (British), e (Spanish), f (French), h (Hindi), i (Italian), j (Japanese), p (Portuguese), z (Chinese)",
+      "voice": "af_bella",
+      "lang_code": "a",
+      "speed": 1.0
+    },
     "orca": {
       "_model_path_note": "Optional custom .pv model file path. Leave null to use built-in voice models.",
       "_voice_options": "en_female, en_male, de_female, de_male, es_female, es_male, fr_female, fr_male, it_female, it_male, ja_female, ko_female, pt_female, pt_male",
@@ -26,8 +33,8 @@
       "voice": "en_female"
     },
     "tts": {
-      "_engine_options": "coqui, orca",
-      "engine": "orca",
+      "_engine_options": "coqui, orca, kokoro",
+      "engine": "kokoro",
       "model_name": "tts_models/en/vctk/vits",
       "output_dir": "output",
       "speaker": "p272"
