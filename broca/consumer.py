@@ -56,8 +56,8 @@ class BrocaConfig:
         )
         self.coqui_speaker = self.cfg.get("TTS_SPEAKER", "p225")
 
-        # Orca TTS settings
-        self.orca_access_key = self.cfg.get("ORCA_ACCESS_KEY", None)
+        # Orca TTS settings (uses shared Picovoice access key from .env)
+        self.orca_access_key = self.cfg.get("PICOVOICE_ACCESS_KEY", None)
         self.orca_voice = self.cfg.get("ORCA_VOICE", None)
         self.orca_model_path = self.cfg.get_path("ORCA_MODEL_PATH", None)
 

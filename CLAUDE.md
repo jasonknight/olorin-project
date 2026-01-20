@@ -404,10 +404,12 @@ let patterns = config.get_list("CHAT_RESET_PATTERNS", None);
 
 **Secret Keys**: Sensitive values like API keys are stored in `.env` file (never in `settings.json`). The Config library handles secret keys specially - they are only read from `.env` or environment variables, never from `settings.json`. Currently defined secret keys:
 - `ANTHROPIC_API_KEY` - Anthropic Claude API key
+- `PICOVOICE_ACCESS_KEY` - Picovoice access key (shared by Orca TTS and Porcupine wake word)
 
 Example `.env` file:
 ```
 ANTHROPIC_API_KEY=sk-ant-api03-...
+PICOVOICE_ACCESS_KEY=H7Iau...
 ```
 
 Components access secret keys the same way as regular config:

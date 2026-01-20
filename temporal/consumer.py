@@ -56,8 +56,8 @@ class TemporalConfig:
         self.feedback_message = self.cfg.get("TEMPORAL_FEEDBACK_MESSAGE", None)
         self.completion_message = self.cfg.get("TEMPORAL_COMPLETION_MESSAGE", None)
 
-        # Porcupine wake word detection
-        self.porcupine_access_key = self.cfg.get("TEMPORAL_PORCUPINE_ACCESS_KEY", None)
+        # Porcupine wake word detection (uses shared Picovoice access key from .env)
+        self.porcupine_access_key = self.cfg.get("PICOVOICE_ACCESS_KEY", None)
         self.porcupine_keyword_path = self.cfg.get_path(
             "TEMPORAL_PORCUPINE_KEYWORD_PATH", None
         )
@@ -232,7 +232,7 @@ class TemporalConsumer:
         else:
             self.logger.info(
                 "Porcupine not configured, using Whisper-based wake word detection. "
-                "Set temporal.porcupine.access_key and temporal.porcupine.keyword_path "
+                "Set PICOVOICE_ACCESS_KEY in .env and temporal.porcupine.keyword_path "
                 "in settings.json to use Porcupine."
             )
 

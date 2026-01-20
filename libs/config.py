@@ -15,7 +15,7 @@ from typing import Any, List, Optional, Union
 # These are sensitive values like API keys that should not be stored in version control
 _SECRET_KEYS = {
     "ANTHROPIC_API_KEY",
-    # Future secret keys can be added here
+    "PICOVOICE_ACCESS_KEY",  # Shared key for Orca TTS and Porcupine wake word
 }
 
 

@@ -21,7 +21,7 @@
     "orca": {
       "_model_path_note": "Optional custom .pv model file path. Leave null to use built-in voice models.",
       "_voice_options": "en_female, en_male, de_female, de_male, es_female, es_male, fr_female, fr_male, it_female, it_male, ja_female, ko_female, pt_female, pt_male",
-      "access_key": "H7IauigF7dKSHFcCiltMzra0EZW2TsPUIK/HnjUTXCJSeirS3Xxhag==",
+      "_access_key_note": "Set PICOVOICE_ACCESS_KEY in .env file",
       "model_path": null,
       "voice": "en_female"
     },
@@ -157,7 +157,7 @@
     "feedback_topic": "ai_out",
     "output_topic": "ai_in",
     "porcupine": {
-      "access_key": "H7IauigF7dKSHFcCiltMzra0EZW2TsPUIK/HnjUTXCJSeirS3Xxhag==",
+      "_access_key_note": "Set PICOVOICE_ACCESS_KEY in .env file",
       "keyword_path": "/Users/olorin/Downloads/Hey-Computer_en_mac_v4_0_0/Hey-Computer_en_mac_v4_0_0.ppn",
       "sensitivity": 0.5
     },
