@@ -9,9 +9,11 @@
 
 # Olorin
 
-**Your AI-powered Second Brain with a Voice**
+Olorin is what you imagined AI would be. Something you talk to, that talks back. 
 
-Olorin is a personal AI assistant designed to be your Chief of Staff—always listening, always ready to help, with instant access to your documents and knowledge. Talk to it naturally, and it talks back.
+Olorin is a personal AI assistant designed to be your Chief of Staff. Always listening, always ready to help, with instant access to your documents and knowledge. Talk to it naturally, and it talks back.
+
+While Olorin is always listening, it's processing audio locally, not in the cloud. It also produces audio locally. In fact, you can use only local models if that's what you want.
 
 > **Note: This project is in active development.** Some features described below are partially implemented or experimental. The architecture is stable, but expect rough edges. Contributions and feedback welcome.
 
@@ -19,9 +21,15 @@ Olorin is a personal AI assistant designed to be your Chief of Staff—always li
 
 - **Voice In, Voice Out** — Speak naturally using a wake phrase. Get spoken responses back.
 - **Knows Your Documents** — Drop files into a folder. Olorin reads, indexes, and recalls them when relevant.
-- **Multiple AI Backends** — Use Claude, Ollama (local), or distributed inference. Your choice.
+- **Controls your calendar** - Schedule appointments, track to-dos, create alarms and timers.
+- **Multiple Input Channels** - Use Slack, Facetime, Discord, Email to send prompts and get responses.
+- **Multiple AI Backends** — Use Claude, Gemini, Deepseek, Ollama (local), or distributed inference. Your choice.
 - **Takes Action** — The AI can write files, search your knowledge base, and execute tasks.
 - **Remembers Everything** — Full conversation history with context tracking across sessions.
+
+## Why "Olorin"?
+
+Olorin is Gandalf's original name in Valinor, a Maiar spirit who walked among the peoples of Middle Earth, offering wisdom and guidance. Like his namesake, this assistant is meant to be a wise companion: always present, deeply knowledgeable, and ready to help when called upon.
 
 ## Quick Start
 
@@ -263,9 +271,7 @@ Run `python3 setup.py` to check all dependencies.
 | AI not responding | Verify backend is running (Ollama/Exo/API key) |
 | RLM not activating | Check model supports code generation, verify `rlm.enabled: true` |
 
-## Why "Olorin"?
 
-Olorin is Gandalf's original name in Valinor—a Maia spirit who walked among the peoples of Middle-earth, offering wisdom and guidance. Like its namesake, this assistant is meant to be a wise companion: always present, deeply knowledgeable, and ready to help when called upon.
 
 ---
 

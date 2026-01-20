@@ -291,13 +291,22 @@ class RLMExecutor:
             True if RLM should be used
         """
         if not self.config.enabled:
+            logger.debug("[RLM] Decision: NO - RLM disabled in config")
             return False
 
         # Estimate tokens (rough: 4 chars per token)
         estimated_tokens = context_size // 4
+        threshold_tokens = int(context_window * self.config.context_threshold)
+        use_rlm = estimated_tokens > threshold_tokens
 
-        # Use RLM if context exceeds threshold
-        return estimated_tokens > context_window * self.config.context_threshold
+        logger.debug(
+            f"[RLM] Decision: {'YES' if use_rlm else 'NO'} - "
+            f"context_chars={context_size:,}, est_tokens={estimated_tokens:,}, "
+            f"context_window={context_window:,}, threshold={self.config.context_threshold:.0%}, "
+            f"threshold_tokens={threshold_tokens:,}"
+        )
+
+        return use_rlm
 
     def execute(
         self,

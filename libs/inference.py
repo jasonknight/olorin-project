@@ -1481,20 +1481,33 @@ class AnthropicBackend(InferenceBackend):
         Returns:
             True if RLM should be used
         """
-        if not self._rlm_enabled or self._rlm_executor is None:
+        if not self._rlm_enabled:
+            logger.debug("[RLM] Skipped: RLM disabled in configuration")
+            return False
+
+        if self._rlm_executor is None:
+            logger.debug("[RLM] Skipped: RLM executor not initialized")
             return False
 
         # Calculate total context size
         total_chars = sum(len(msg.get("content", "") or "") for msg in messages)
+        logger.debug(
+            f"[RLM] Evaluating: {len(messages)} messages, {total_chars:,} total chars"
+        )
 
         # Get context window for current model
         capabilities = self.get_model_capabilities()
         if capabilities is None:
+            logger.debug("[RLM] Skipped: Could not get model capabilities")
             return False
 
         context_window = capabilities.context_length
+        logger.debug(
+            f"[RLM] Model capabilities: context_window={context_window:,} tokens, "
+            f"model={self._default_model}"
+        )
 
-        # Check if RLM should be used
+        # Check if RLM should be used (detailed logging in executor)
         return self._rlm_executor.should_use_rlm(total_chars, context_window)
 
     def _extract_context_and_question(self, messages: list[dict]) -> tuple[str, str]:
@@ -1513,8 +1526,12 @@ class AnthropicBackend(InferenceBackend):
 
         context = ""
         question = ""
+        context_source = None
+        question_source = None
 
-        for msg in messages:
+        logger.debug(f"[RLM] Extracting context/question from {len(messages)} messages")
+
+        for i, msg in enumerate(messages):
             content = msg.get("content", "") or ""
             role = msg.get("role", "")
 
@@ -1525,6 +1542,11 @@ class AnthropicBackend(InferenceBackend):
                 )
                 if context_match:
                     context = context_match.group(1).strip()
+                    context_source = f"user message {i}"
+                    logger.debug(
+                        f"[RLM] Found <context> tags in user message {i}: "
+                        f"{len(context):,} chars"
+                    )
                     # Extract question after context
                     after_context = content[context_match.end() :].strip()
                     if after_context:
@@ -1536,11 +1558,20 @@ class AnthropicBackend(InferenceBackend):
                         )
                         if q_match:
                             question = q_match.group(1).strip()
+                            question_source = f"user message {i} (Question: prefix)"
                         else:
                             question = after_context
+                            question_source = f"user message {i} (after context)"
+                        logger.debug(
+                            f"[RLM] Found question in {question_source}: "
+                            f"'{question[:80]}{'...' if len(question) > 80 else ''}'"
+                        )
                 elif not context:
                     # No context tags - treat entire content as question
                     question = content
+                    question_source = (
+                        f"user message {i} (full content, no context tags)"
+                    )
 
             elif role == "system":
                 # System prompt could contain context
@@ -1550,6 +1581,22 @@ class AnthropicBackend(InferenceBackend):
                     )
                     if context_match:
                         context = context_match.group(1).strip()
+                        context_source = f"system message {i}"
+                        logger.debug(
+                            f"[RLM] Found <context> tags in system message {i}: "
+                            f"{len(context):,} chars"
+                        )
+
+        if not context:
+            logger.debug("[RLM] No <context> tags found in any message")
+        if not question:
+            logger.debug("[RLM] No question extracted from messages")
+
+        logger.debug(
+            f"[RLM] Extraction result: context={len(context):,} chars "
+            f"(from {context_source or 'none'}), "
+            f"question={len(question)} chars (from {question_source or 'none'})"
+        )
 
         return context, question
 
@@ -1817,14 +1864,22 @@ class AnthropicBackend(InferenceBackend):
             raise ValueError("No model available for inference")
 
         # Check if RLM should be used (only for non-tool calls)
-        if not tools and self._should_use_rlm(messages):
+        if tools:
+            logger.debug(f"[RLM] Skipped: {len(tools)} tool(s) present in request")
+        elif self._should_use_rlm(messages):
             context, question = self._extract_context_and_question(messages)
             if context and question:
                 logger.info(
-                    f"Routing to RLM: {len(context):,} char context, "
+                    f"[RLM] Routing to RLM: {len(context):,} char context, "
                     f"question: {question[:100]}..."
                 )
                 return self.complete_with_rlm(context, question, model)
+            else:
+                logger.debug(
+                    f"[RLM] Skipped: Extraction failed - "
+                    f"context={'found' if context else 'missing'} ({len(context):,} chars), "
+                    f"question={'found' if question else 'missing'}"
+                )
 
         # Convert messages
         system_prompt, converted_messages = self._convert_messages_for_anthropic(
