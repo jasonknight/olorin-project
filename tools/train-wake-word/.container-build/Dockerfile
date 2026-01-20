@@ -50,10 +50,9 @@ RUN pip install --no-cache-dir -c /tmp/constraints.txt \
 
 # piper-sample-generator v2.0.0 (has default model, compatible with openwakeword)
 # Clone it so we have the generate_samples.py script available
-# Note: v2.0.0 lacks setup.py/pyproject.toml, so install deps from requirements.txt
 RUN git clone --branch v2.0.0 --depth 1 https://github.com/rhasspy/piper-sample-generator.git /opt/piper-sample-generator && \
     cd /opt/piper-sample-generator && \
-    pip install --no-cache-dir -c /tmp/constraints.txt -r requirements.txt && \
+    pip install --no-cache-dir -c /tmp/constraints.txt -e . && \
     ls -la /opt/piper-sample-generator/
 
 COPY train_in_container.py /app/
